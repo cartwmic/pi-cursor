@@ -42,7 +42,7 @@ const RESUME_CONTEXT_PRIORITY =
 
 /** Markers that begin a side-channel block inside an otherwise normal user turn. */
 const SIDE_CHANNEL_BLOCK_START =
-  /(?:^|\n)[ \t]*(?:context-mode active\b|\[context\]|\[pi-lens automated\b|<session_state\b|<session_resume\b|<active_memory\b|<compaction\b|<session_mode\b|Hierarchy:\s*ctx_batch_execute)/i;
+  /(?:^|\n)[ \t]*(?:context-mode active\b|\[context\]|\[pi-lens automated\b|<injected-context\b|<session_state\b|<session_resume\b|<active_memory\b|<compaction\b|<session_mode\b|Hierarchy:\s*ctx_batch_execute)/i;
 
 export function textContent(content: OpenAIMessage["content"]): string {
   if (content == null) return "";
@@ -70,6 +70,7 @@ export function isContextModeSideChannelText(text: string): boolean {
     /^context-mode active\b/i.test(t) ||
     /^\[context\]/i.test(t) ||
     /(?:^|\n)[ \t]*\[pi-lens automated\b/i.test(t) ||
+    t.includes("<injected-context") ||
     t.includes("<session_state") ||
     t.includes("<session_resume") ||
     t.includes("<active_memory>") ||
