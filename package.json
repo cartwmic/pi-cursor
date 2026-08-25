@@ -36,7 +36,6 @@
   ],
   "scripts": {
     "build": "tsup",
-    "prepare": "node scripts/prepare.mjs",
     "prepublishOnly": "yarn build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests",
@@ -60,7 +59,7 @@
   },
   "pi": {
     "extensions": [
-      "./dist/index.js"
+      "./src/index.ts"
     ]
   },
   "dependencies": {
