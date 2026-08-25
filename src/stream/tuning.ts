@@ -149,6 +149,7 @@ export function interactionUpdateProgress(
   if (updateCase === "partialToolCall") return "work";
   if (updateCase === "toolCallDelta") return "work";
   if (updateCase === "thinkingCompleted") return "work";
+  if (updateCase === "stepStarted" || updateCase === "stepCompleted") return "work";
   if (
     updateCase === "summary" ||
     updateCase === "summaryStarted" ||

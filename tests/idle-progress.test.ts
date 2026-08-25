@@ -170,6 +170,8 @@ describe("idle progress classification", () => {
     expect(interactionUpdateProgress("toolCallCompleted")).toBe("work");
     expect(interactionUpdateProgress("thinkingCompleted")).toBe("work");
     expect(interactionUpdateProgress("toolCallStarted")).toBe("work");
+    expect(interactionUpdateProgress("stepStarted")).toBe("work");
+    expect(interactionUpdateProgress("stepCompleted")).toBe("work");
     expect(interactionUpdateProgress("heartbeat")).toBe("liveness");
   });
 
