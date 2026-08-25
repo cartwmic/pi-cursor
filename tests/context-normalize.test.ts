@@ -25,6 +25,19 @@ const injection = [
   "</session_state>",
 ].join("\n");
 
+const injectedContextInjection = [
+  "<injected-context>",
+  "",
+  "<hindsight_memories>",
+  "Relevant memories from past sessions (prioritize recent when conflicting). " +
+    "This block was injected by auto-recall; the user did not type it:",
+  "",
+  "- The team decided to pin harpoon at commit ad1963c for fullscreen fixes.",
+  "</hindsight_memories>",
+  "",
+  "</injected-context>",
+].join("\n");
+
 describe("context-mode normalization", () => {
   it("detects side-channel text", () => {
     expect(isContextModeSideChannelText(injection)).toBe(true);
@@ -56,6 +69,33 @@ describe("context-mode normalization", () => {
     expect(system).toMatch(/provider_context source="context-mode"/);
     expect(system).toMatch(/recovered conversation context/i);
     expect(system).toMatch(/session_mode/);
+  });
+
+  it("folds a trailing <injected-context> user message into the system prompt", () => {
+    expect(isContextModeSideChannelText(injectedContextInjection)).toBe(true);
+    expect(isPureContextModeSideChannelText(injectedContextInjection)).toBe(true);
+    expect(isNoOpSideChannelText(injectedContextInjection)).toBe(false);
+
+    const normalized = normalizeMessagesForCursor([
+      { role: "system", content: "You are Pi." },
+      { role: "user", content: "fix the stall retry in the cursor provider" },
+      { role: "user", content: injectedContextInjection },
+    ]);
+
+    const users = normalized.filter((m) => m.role === "user");
+    expect(users).toHaveLength(1);
+    expect(users[0]?.content).toBe("fix the stall retry in the cursor provider");
+
+    const system = String(normalized.find((m) => m.role === "system")?.content ?? "");
+    expect(system).toMatch(/provider_context source="context-mode"/);
+    expect(system).toMatch(/hindsight_memories/);
+  });
+
+  it("keeps a real prompt that has a trailing <injected-context> block in the same message", () => {
+    const mixed = `run the tests\n\n${injectedContextInjection}`;
+    const { userText, sideText } = splitUserTextAndSideChannel(mixed);
+    expect(userText).toBe("run the tests");
+    expect(sideText).toContain("<injected-context>");
   });
 
   it("splits a real prompt that was concatenated with a context-mode injection", () => {
