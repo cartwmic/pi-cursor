@@ -10,8 +10,10 @@ import {
 import {
   enhanceCursorStreamError,
   isAuthErrorMessage,
+  isContextOverflowMessage,
   isProtocolMismatchMessage,
 } from "../src/stream/protocol.js";
+import { recordDriftSignal, resetDriftSignalsForTests } from "../src/stream/drift.js";
 import { createConnectFrameParser, parseConnectEndStream } from "../src/client/bridge.js";
 
 describe("protocol helpers", () => {
@@ -19,6 +21,12 @@ describe("protocol helpers", () => {
     expect(isAuthErrorMessage("Connect error unauthenticated: bad token")).toBe(true);
     expect(isAuthErrorMessage("normal failure")).toBe(false);
     expect(isProtocolMismatchMessage("Failed to parse Connect end stream")).toBe(true);
+    expect(isProtocolMismatchMessage("Connect error resource_exhausted: request too large")).toBe(
+      false,
+    );
+    expect(isProtocolMismatchMessage("Connect error internal: boom")).toBe(false);
+    expect(isProtocolMismatchMessage("Connect error unavailable")).toBe(false);
+    expect(isContextOverflowMessage("Connect error resource_exhausted: Error")).toBe(true);
   });
 
   it("enhances auth/protocol errors with hints", () => {
@@ -28,6 +36,13 @@ describe("protocol helpers", () => {
     const proto = enhanceCursorStreamError("Failed to parse Connect end stream");
     expect(proto).toMatch(/protocol-hint/);
     expect(proto).toMatch(/PI_CURSOR_CLIENT_VERSION/);
+    resetDriftSignalsForTests();
+    recordDriftSignal("unknown_fields", "conversationCheckpointUpdate.payload#34,37");
+    const overflow = enhanceCursorStreamError("Connect error resource_exhausted: Error");
+    expect(overflow).toMatch(/context-hint/);
+    expect(overflow).not.toMatch(/protocol-hint/);
+    expect(overflow).not.toContain("[wire-drift");
+    resetDriftSignalsForTests();
   });
 
   it("round-trips current server metadata fields", () => {
@@ -50,6 +65,32 @@ describe("protocol helpers", () => {
       conversationStartedTimestampMs: 1_787_691_919_077n,
       conversationStartedTimeZone: "UTC",
     });
+
+    const recovered = create(ConversationStateStructureSchema, {
+      activeBranchName: "main",
+      clientName: "pi",
+      isRootProjectConversation: true,
+      unknownField37: 7n,
+    });
+    const recoveredRoundTrip = fromBinary(
+      ConversationStateStructureSchema,
+      toBinary(ConversationStateStructureSchema, recovered),
+    );
+    expect(recoveredRoundTrip).toMatchObject({
+      activeBranchName: "main",
+      clientName: "pi",
+      isRootProjectConversation: true,
+      unknownField37: 7n,
+    });
+    expect(recoveredRoundTrip.$unknown ?? []).toEqual([]);
+
+    // field 37 VARINT 7: tag (37<<3)|0 = 296 → 0xa8 0x02, value 7
+    const field37Only = fromBinary(
+      ConversationStateStructureSchema,
+      new Uint8Array([0xa8, 0x02, 0x07]),
+    );
+    expect(field37Only.unknownField37).toBe(7n);
+    expect((field37Only.$unknown ?? []).some((field) => field.no === 37)).toBe(false);
 
     const exec = create(ExecServerMessageSchema, { acceptHookAdditionalContexts: false });
     expect(

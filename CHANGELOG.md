@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`Connect error resource_exhausted` is no longer labeled as Cursor wire-drift.** `PROTOCOL_ERROR_RE` matched any `Connect error`, so a blob-cap miss that rebuilt ~388k tokens / 1.5 MiB and overflowed the request was annotated with unknown checkpoint fields 34/37. Overflow now gets a context-size hint (`/compact` or a new session). Unknown additive checkpoint fields stay informational in `/cursor.doctor`.
+- **Blob-store entry cap raised from 512 to 4096.** The 512-entry bound was hit around 20 turns while the 128 MiB byte cap still had headroom; eviction then `kv_blob_miss` dropped the checkpoint and forced the overflow rebuild above.
+
+### Internal
+
+- Recovered Cursor 3.15.6 `ConversationStateStructure` fields 19–20 and 23–33 (`active_branch_name`, plans, communicate-update maps, `goal_state`, …) plus cloud-only field 37 as `unknown_field_37` (VARINT). Fields 21/22 stay `extra_state` / `client_name` because outbound encoding uses field 22 as client identity. Field 34 remains unnamed (`$unknown`) until a live frame captures its wire type.
+
 ## [1.4.27] - 2026-08-22
 
 ### Fixed
