@@ -145,6 +145,87 @@ describe("contextToCursorChatCompletionRequest", () => {
     const parsed = parseMessages(body.messages);
     expect(parsed.turns[0]!.steps.some((step) => step.kind === "thinking")).toBe(true);
   });
+
+  it("replays the pi 0.86 transcript system message into the prompt and tools", () => {
+    // pi 0.86 passes a normalized transcript: the prompt and tool declarations ride
+    // system messages (content + sections, toolsAdded/toolsRemoved), and
+    // Context.systemPrompt / Context.tools are absent.
+    const body = contextToCursorChatCompletionRequest(
+      model,
+      {
+        messages: [
+          {
+            role: "system",
+            content: "",
+            sections: { preamble: "You are Pi.", cwd: "/tmp" },
+            toolsAdded: [
+              {
+                name: "bash",
+                description: "run shell",
+                parameters: { type: "object", properties: {} },
+              },
+            ],
+            timestamp: 0,
+          },
+          { role: "user", content: [{ type: "text", text: "do the thing" }] },
+        ],
+      } as never,
+      undefined,
+      config,
+    );
+    const system = body.messages.find((m) => m.role === "system");
+    expect(system).toBeDefined();
+    expect(String(system?.content)).toContain("You are Pi.");
+    expect(body.tools).toHaveLength(1);
+    expect(body.tools![0]!.function.name).toBe("bash");
+  });
+
+  it("replays toolsRemoved before toolsAdded across system messages", () => {
+    const bashTool = {
+      name: "bash",
+      description: "run shell",
+      parameters: { type: "object", properties: {} },
+    };
+    const editTool = {
+      name: "edit",
+      description: "edit file",
+      parameters: { type: "object", properties: {} },
+    };
+    const body = contextToCursorChatCompletionRequest(
+      model,
+      {
+        messages: [
+          {
+            role: "system",
+            content: "",
+            toolsAdded: [bashTool, editTool],
+            timestamp: 0,
+          },
+          { role: "user", content: [{ type: "text", text: "first" }] },
+          { role: "system", content: "", toolsRemoved: [bashTool], timestamp: 1 },
+          { role: "user", content: [{ type: "text", text: "second" }] },
+        ],
+      } as never,
+      undefined,
+      config,
+    );
+    expect(body.tools?.map((t) => t.function.name)).toEqual(["edit"]);
+  });
+
+  it("falls back to Context.systemPrompt when the transcript has no system messages", () => {
+    const body = contextToCursorChatCompletionRequest(
+      model,
+      {
+        systemPrompt: "SYS",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        tools: [{ name: "bash", description: "d", parameters: { type: "object", properties: {} } }],
+      } as never,
+      undefined,
+      config,
+    );
+    expect(body.messages[0]).toMatchObject({ role: "system", content: "SYS" });
+    expect(body.tools).toHaveLength(1);
+  });
 });
 
 describe("parseMessages", () => {

@@ -252,6 +252,75 @@ export function applyNativeCursorRouting(
     body.cursor_model_max_mode = routing.requestedMaxMode;
 }
 
+/**
+ * Pi 0.86 moved the prompt and tool declarations out of `Context.systemPrompt` /
+ * `Context.tools`: providers receive a normalized transcript whose system messages
+ * carry `content` + `sections` and `toolsAdded`/`toolsRemoved` deltas. Replay those
+ * here, mirroring pi-ai's `getCurrentSystemMessage` / `getCurrentTools`, and fall
+ * back to the raw `Context` fields for callers that still pass them (older pi,
+ * tests).
+ *
+ * The system-message shape is structural on purpose: the pi-ai version resolved at
+ * typecheck time may predate the transcript fields, while the runtime always sends
+ * them once pi 0.86 is live.
+ */
+interface TranscriptSystemMessage {
+  role: "system";
+  content: unknown;
+  sections?: Record<string, string | null>;
+  toolsAdded?: Array<{ name: string }>;
+  toolsRemoved?: Array<{ name: string }>;
+}
+
+function isSystemRoleMessage(message: PiMessage): boolean {
+  return (message as { role: string }).role === "system";
+}
+
+function systemMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter(
+      (block): block is { type: "text"; text: string } =>
+        !!block &&
+        (block as { type?: unknown }).type === "text" &&
+        typeof (block as { text?: unknown }).text === "string",
+    )
+    .map((block) => block.text)
+    .join("\n");
+}
+
+export function systemPromptFromTranscript(messages: PiMessage[]): string | undefined {
+  const parts: string[] = [];
+  const sections = new Map<string, string>();
+  let sawSystemMessage = false;
+  for (const message of messages) {
+    if (!isSystemRoleMessage(message)) continue;
+    sawSystemMessage = true;
+    const system = message as unknown as TranscriptSystemMessage;
+    const text = systemMessageText(system.content);
+    if (text.length > 0) parts.push(text);
+    for (const [name, value] of Object.entries(system.sections ?? {})) {
+      if (value === null || value === undefined) sections.delete(name);
+      else sections.set(name, value);
+    }
+  }
+  if (!sawSystemMessage) return undefined;
+  for (const text of sections.values()) parts.push(text);
+  return parts.filter((part) => part.length > 0).join("\n\n");
+}
+
+export function transcriptTools(messages: PiMessage[]): PiTool[] {
+  const tools = new Map<string, PiTool>();
+  for (const message of messages) {
+    if (!isSystemRoleMessage(message)) continue;
+    const system = message as unknown as TranscriptSystemMessage;
+    for (const tool of system.toolsRemoved ?? []) tools.delete(tool.name);
+    for (const tool of system.toolsAdded ?? []) tools.set(tool.name, tool as PiTool);
+  }
+  return [...tools.values()];
+}
+
 export function contextToCursorChatCompletionRequest(
   model: Model<Api>,
   context: Context,
@@ -259,7 +328,11 @@ export function contextToCursorChatCompletionRequest(
   config: CursorNativeStreamConfig,
 ): ChatCompletionRequest {
   const messages: OpenAIMessage[] = [];
-  if (context.systemPrompt) messages.push({ role: "system", content: context.systemPrompt });
+  const transcriptPrompt = systemPromptFromTranscript(context.messages);
+  const transcriptToolsList = transcriptTools(context.messages);
+  const systemPrompt =
+    transcriptPrompt !== undefined ? transcriptPrompt : (context.systemPrompt ?? "");
+  if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
 
   for (const [index, message] of context.messages.entries()) {
     if (message.role === "user") {
@@ -300,7 +373,9 @@ export function contextToCursorChatCompletionRequest(
     model: model.id,
     messages,
     stream: true,
-    tools: (context.tools ?? []).map(piToolToOpenAI),
+    tools: (transcriptToolsList.length > 0 ? transcriptToolsList : (context.tools ?? [])).map(
+      piToolToOpenAI,
+    ),
     tool_choice: options?.toolChoice,
     reasoning_effort: resolveNativeReasoningEffort(
       model,
