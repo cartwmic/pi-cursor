@@ -166,6 +166,7 @@ import {
   CHECKPOINT_CONTINUATION_PROMPT,
   classifyBridgeExit,
   formatTransportFailure,
+  isGoawayEndStreamError,
 } from "./transport-errors.js";
 export {
   CHECKPOINT_CONTINUATION_PROMPT,
@@ -1281,6 +1282,21 @@ function writeNativeStream(
           });
           return;
         }
+        // A GOAWAY end-stream frame is a retriable transport loss, not a server refusal:
+        // the bridge writes this frame and then exits with code 2, which the onClose path
+        // classifies as retryable and continues via checkpoint/history recovery. Killing
+        // the turn here raced that path — the error frame always arrives before the exit,
+        // so every GOAWAY became a fatal turn failure (observed: 'Connect error
+        // unavailable: Cursor GOAWAY (errorCode=0)' ending a turn that had a checkpoint
+        // and could have continued). Leave the turn open and let the exit route it.
+        if (isGoawayEndStreamError(endError.message) && !pauseRequested) {
+          debugLog("native.stream.goaway_deferred_to_exit", {
+            requestId,
+            modelId,
+            message: endError.message,
+          });
+          return;
+        }
         streamError = endError;
         const enhanced = enhanceCursorStreamError(endError.message);
         debugLog("native.stream.cursor_error", {
@@ -1882,7 +1898,8 @@ export function resolveRequestedModelId(
   model: string | CursorResolvableModel,
   reasoningEffort?: string,
   cursorModelIdOrRoutingByModelId?:
-    string | Map<string, Record<string, CursorNativeModelRouting> | CursorNativeModelRouting>,
+    | string
+    | Map<string, Record<string, CursorNativeModelRouting> | CursorNativeModelRouting>,
 ): string | ResolvedCursorModelRouting {
   return resolveRequestedModelIdImpl(
     model as any,

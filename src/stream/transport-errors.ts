@@ -31,6 +31,11 @@ const RESET_RE = /\b(ECONNRESET|ENOTFOUND|EAI_AGAIN|EPIPE|socket hang up|connect
 const TIMEOUT_RE = /\b(ETIMEDOUT|timed? ?out|timeout)\b/i;
 const PROTOCOL_RE = /\b(protocol|protobuf|wire drift|invalid argument|failed_precondition)\b/i;
 
+/** Whether an end-stream error message is a retriable GOAWAY transport loss. */
+export function isGoawayEndStreamError(message: string): boolean {
+  return GOAWAY_RE.test(message);
+}
+
 export function classifyBridgeExit(input: {
   exitCode: number;
   stderr?: string;

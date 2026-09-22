@@ -432,6 +432,95 @@ describe("completed-turn connection close", () => {
     expect(calls).toEqual(["done:stop"]);
   });
 
+  it("defers a mid-turn GOAWAY to the exit path so checkpoint continuation can run", () => {
+    // The GOAWAY error frame always arrives before the bridge's exit 2. Killing the turn
+    // on the frame raced the onClose retry path — every GOAWAY became a fatal turn
+    // failure even when a checkpoint could have continued it (observed on the PRD-Forge
+    // session: 'Connect error unavailable: Cursor GOAWAY (errorCode=0)'). Mid-turn, the
+    // frame must leave the turn open; the exit path classifies code 2 as retryable.
+    const calls: string[] = [];
+    const writer = {
+      output: {} as never,
+      closed: false,
+      start() {},
+      text() {},
+      thinking() {},
+      toolCall() {},
+      done(reason: string) {
+        calls.push(`done:${reason}`);
+        this.closed = true;
+      },
+      error(message: string) {
+        calls.push(`error:${message}`);
+        this.closed = true;
+      },
+    };
+    let onData: (chunk: Buffer) => void = () => {};
+    let onClose: (code: number) => void = () => {};
+    const bridge = {
+      proc: { kill: () => true },
+      alive: true,
+      lastStderr: () => "GOAWAY errorCode=0",
+      write: () => {},
+      end: () => {},
+      onData: (cb: (chunk: Buffer) => void) => {
+        onData = cb;
+      },
+      onClose: (cb: (code: number) => void) => {
+        onClose = cb;
+      },
+    };
+    const heartbeatTimer = setInterval(() => {}, 60_000);
+
+    __testInternals.writeNativeStream(
+      bridge,
+      heartbeatTimer,
+      new Map(),
+      [],
+      {} as never,
+      "claude-4.5-sonnet",
+      "bridge-key",
+      "conv-key",
+      [],
+      { userText: "hi", steps: [] },
+      writer as never,
+      undefined,
+      "req-goaway",
+      undefined,
+      0,
+    );
+
+    onData(
+      updateFrame({
+        case: "textDelta",
+        value: create(TextDeltaUpdateSchema, { text: "partial" }),
+      }),
+    );
+    // GOAWAY mid-turn: no turnEnded has arrived, so the turn is still live.
+    onData(
+      frame(
+        new TextEncoder().encode(
+          JSON.stringify({
+            error: {
+              code: "unavailable",
+              message: "Cursor GOAWAY (errorCode=0): upstream connection closed, retriable",
+            },
+          }),
+        ),
+        2,
+      ),
+    );
+    // The bridge exits 2 right after. With no checkpoint in this test harness the
+    // onClose fallback fails the turn — but with the GOAWAY message text, not the
+    // raw frame, and only after the retry path had its chance.
+    onClose(2);
+    clearInterval(heartbeatTimer);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("GOAWAY");
+    expect(writer.closed).toBe(true);
+  });
+
   it("fails a turn parked on an unanswerable exec even while heartbeats keep arriving", async () => {
     const calls: string[] = [];
     const written: Uint8Array[] = [];
