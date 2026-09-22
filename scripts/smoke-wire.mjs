@@ -50,8 +50,12 @@ if (exitCode !== 0) {
   process.exit(1);
 }
 
-// Connect unary responses are a 5-byte framed envelope around the message.
-const payload = body.length > 5 ? body.subarray(5) : body;
+// Both unary transports (in-process h2 and the bridge) return the RAW protobuf
+// response: the h2 client sends `content-type: application/proto` and the bridge
+// writes response chunks length-prefixed, which the parent reassembles into the
+// original bytes. An older revision assumed a 5-byte Connect envelope here and
+// decoded mid-message garbage as "cant skip wire type 4".
+const payload = body;
 
 let response;
 try {

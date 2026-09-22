@@ -623,6 +623,12 @@ message ConversationStateStructure {
   // Cursor.app 3.15.6 workbench (schema ends at 33). Name unrecovered.
   // Field 34 is live-stream only; leave it in $unknown until its wire type is captured.
   optional uint64 unknown_field_37 = 37;
+  // Live-stream only (2026-09-21 captures): field 38 is a length-delimited value,
+  // constant within a session (37 bytes) and differing across sessions — session
+  // identity or a per-conversation token. Field 39 is a VARINT, observed value 1.
+  // Names unrecovered; recovered so $unknown stops flagging every checkpoint.
+  optional bytes unknown_field_38 = 38;
+  optional uint64 unknown_field_39 = 39;
 }
 
 message ThinkingDetails {
@@ -1557,6 +1563,11 @@ message ExecServerMessage {
   string exec_id = 15;
   optional SpanContext span_context = 19;
   optional bool accept_hook_additional_contexts = 55;
+  // Live-stream captures (2026-09-21) show two further exec cases this build has
+  // no branch for: field 28 (length-delimited, 213 bytes) and field 36
+  // (length-delimited, 1–5 bytes). Content is not safely decodable from the
+  // captured metadata alone, so they stay $unknown and keep the
+  // ExecClientThrow answer; recorded here so the drift is documented.
   oneof message {
     ShellArgs shell_args = 2;
     WriteArgs write_args = 3;
