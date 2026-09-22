@@ -795,6 +795,12 @@ message InteractionUpdate {
     StepCompletedUpdate step_completed = 17;
   }
   uint64 timestamp_ms = 25;
+  // Live-stream capture (2026-09-22): a further update case at field 27,
+  // length-delimited, 3 bytes (02 08 01 — not a valid protobuf tag sequence, so
+  // not decodable as a nested message). Observed x4 aligned with
+  // toolCallStarted/toolCallCompleted, likely new per-tool-call metadata.
+  // Name unrecovered; recovered so $unknown stops flagging every turn.
+  optional bytes unknown_field_27 = 27;
 }
 
 message InteractionQuery {

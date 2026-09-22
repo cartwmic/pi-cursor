@@ -109,6 +109,17 @@ export function processServerMessage(
   if (msgCase === "interactionUpdate") {
     const update = msg.message.value as any;
     const updateCase = update.message?.case;
+    // Field 27 is outside the oneof, so an update carrying only that field has no
+    // message case. It is informational (observed x4 aligned with tool-call
+    // updates, 3-byte opaque value) — treat it as work so the watchdog sees
+    // progress, and skip the unknown-case drift signal the fields no longer raise.
+    if (
+      updateCase === undefined &&
+      (update.unknownField27 !== undefined ||
+        update.$unknown?.some((f: { no: number }) => f.no === 27))
+    ) {
+      return "work";
+    }
     if (updateCase === "textDelta") {
       const delta = update.message.value.text || "";
       if (delta) {
