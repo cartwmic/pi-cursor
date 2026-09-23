@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { create, fromBinary } from "@bufbuild/protobuf";
 import {
   AgentClientMessageSchema,
@@ -31,6 +31,7 @@ import { MAX_ACTIVE_BLOB_ENTRIES } from "../src/stream/tuning.js";
 
 afterEach(() => {
   __testInternals.conversationStates.clear();
+  vi.restoreAllMocks();
 });
 
 describe("idle progress classification", () => {
@@ -83,6 +84,7 @@ describe("idle progress classification", () => {
   });
 
   it("answers an exec case it cannot decode with a throw instead of parking", () => {
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
     const message = create(AgentServerMessageSchema, {
       message: {
         case: "execServerMessage",
@@ -119,6 +121,7 @@ describe("idle progress classification", () => {
     const control = answer.message.value as ExecClientControlMessage;
     expect(control.message.case).toBe("throw");
     expect((control.message.value as ExecClientThrow).id).toBe(7);
+    expect(stderr).not.toHaveBeenCalled();
   });
 
   it("evicts the oldest active blob instead of failing the write at the entry bound", () => {
