@@ -692,7 +692,16 @@ function handleExecMessageInner(
   // — Cursor parks the run on the unanswered exec id and heartbeats forever.
   // ExecClientThrow answers any exec by id without claiming a result, so the model
   // sees a failed tool instead of a dead stream.
-  console.error(`[cursor-provider] UNHANDLED exec case: "${execCase}". Answering with a throw.`);
+  //
+  // Not console.error: the exec IS handled (answered with a throw) and the turn
+  // continues, so this is informational noise on a hot path — Cursor's current
+  // server sends the unknown exec on every turn, including short digest requests
+  // (observed x4 in one pi-session-search digest run). The lifecycle log and
+  // /cursor.doctor carry the record; stderr only sees it when debug is enabled.
+  debugLog("exec.unknown_shape_answered", {
+    execCase: execCase ?? "unknown",
+    unknownFields: describeUnknownFields(execMsg),
+  });
   lifecycleLog("exec_unknown_shape", {
     execCase: execCase ?? "unknown",
     unknownFields: describeUnknownFields(execMsg),
