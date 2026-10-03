@@ -105,6 +105,17 @@ describe("protocol helpers", () => {
     ).toMatchObject({ providerTtftMs: 4 });
   });
 
+  it("decodes live checkpoint fields 38/39 without unknown-field drift", () => {
+    // field 38, length-delimited 'abc'; field 39, VARINT 1.
+    const checkpoint = fromBinary(
+      ConversationStateStructureSchema,
+      new Uint8Array([0xb2, 0x02, 0x03, 0x61, 0x62, 0x63, 0xb8, 0x02, 0x01]),
+    );
+    expect(checkpoint.unknownField38).toEqual(new Uint8Array([0x61, 0x62, 0x63]));
+    expect(checkpoint.unknownField39).toBe(1n);
+    expect(checkpoint.$unknown ?? []).toEqual([]);
+  });
+
   it("parses connect end-stream errors", () => {
     const err = parseConnectEndStream(
       new TextEncoder().encode(JSON.stringify({ error: { code: "internal", message: "boom" } })),
