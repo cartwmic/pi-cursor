@@ -124,6 +124,54 @@ describe("idle progress classification", () => {
     expect(stderr).not.toHaveBeenCalled();
   });
 
+  it("pins the retained blob entry cap to 4096", () => {
+    expect(MAX_ACTIVE_BLOB_ENTRIES).toBe(4096);
+  });
+
+  it("retains more than 512 active blobs without evicting earlier entries", () => {
+    const store = new Map<string, Uint8Array>();
+    const state: StreamState = {
+      toolCallIndex: 0,
+      pendingExecs: [],
+      outputTokens: 0,
+      totalTokens: 0,
+      turnEnded: false,
+    };
+    const frames: Uint8Array[] = [];
+    for (let i = 0; i < 513; i++) {
+      const message = create(AgentServerMessageSchema, {
+        message: {
+          case: "kvServerMessage",
+          value: create(KvServerMessageSchema, {
+            message: {
+              case: "setBlobArgs",
+              value: create(SetBlobArgsSchema, {
+                blobId: new Uint8Array([i >> 8, i & 0xff]),
+                blobData: new Uint8Array([1]),
+              }),
+            },
+          }),
+        },
+      });
+      expect(
+        processServerMessage(
+          message,
+          store,
+          [],
+          (frame) => frames.push(frame),
+          state,
+          () => {},
+          () => {},
+        ),
+      ).toBe("work");
+    }
+    expect(frames).toHaveLength(513);
+    expect(store.size).toBe(513);
+    for (let i = 0; i < 513; i++) {
+      expect(store.get(i.toString(16).padStart(4, "0"))).toEqual(new Uint8Array([1]));
+    }
+  });
+
   it("evicts the oldest active blob instead of failing the write at the entry bound", () => {
     const store = new Map<string, Uint8Array>();
     for (let i = 0; i < MAX_ACTIVE_BLOB_ENTRIES; i++) {

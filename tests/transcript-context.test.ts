@@ -89,6 +89,21 @@ describe("resolveTranscriptInputs", () => {
     expect(resolved.systemPrompt).toBe("base rules\n\nmore rules\n\ncwd=/b");
   });
 
+  it("treats an empty transcript tool list as authoritative over stale legacy tools", () => {
+    const context = ctx({
+      systemPrompt: "LEGACY",
+      tools: [tool("legacy")],
+      messages: [systemMessage({ content: "TRANSCRIPT", toolsAdded: [] }), userTurn],
+    });
+    const resolved = resolveTranscriptInputs(context);
+    expect(resolved.systemPrompt).toBe("TRANSCRIPT");
+    expect(resolved.tools).toEqual([]);
+
+    const body = contextToCursorChatCompletionRequest(model, context, undefined, config);
+    expect(body.tools ?? []).toEqual([]);
+    expect(body.messages[0]).toEqual({ role: "system", content: "TRANSCRIPT" });
+  });
+
   it("prefers the transcript when a context carries both shapes", () => {
     const resolved = resolveTranscriptInputs(
       ctx({
