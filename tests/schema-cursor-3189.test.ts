@@ -38,6 +38,29 @@ beforeEach(() => {
 });
 
 describe("Cursor 3.18.9 additive envelope fields", () => {
+  it("treats an opaque field-27-only update as work without wire drift", () => {
+    const update = fromBinary(
+      InteractionUpdateSchema,
+      new Uint8Array([0xda, 0x01, 0x03, 0x02, 0x08, 0x01]),
+    );
+    expect(update.unknownField27).toEqual(new Uint8Array([0x02, 0x08, 0x01]));
+    expect(unknownFieldNos(update)).toEqual([]);
+    expect(
+      processServerMessage(
+        create(AgentServerMessageSchema, {
+          message: { case: "interactionUpdate", value: update },
+        }),
+        new Map(),
+        [],
+        () => {},
+        emptyState(),
+        () => {},
+        () => {},
+      ),
+    ).toBe("work");
+    expect(getDriftSignals()).toEqual([]);
+  });
+
   it("round-trips InteractionUpdate.message_started_at_ms without $unknown", () => {
     const msg = create(InteractionUpdateSchema, {
       message: {
