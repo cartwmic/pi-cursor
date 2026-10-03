@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased — fork]
+
+- Keep context overflow separate from wire-drift and retain up to 4096 conversation blobs.
+- Recover additive checkpoint fields while retaining Pi client identity on fields 21/22.
+
 ## [Unreleased]
 
 ## [1.4.38] - 2026-09-23

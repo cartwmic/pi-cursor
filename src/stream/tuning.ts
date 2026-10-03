@@ -37,11 +37,12 @@ export const DEFAULT_MIDPAUSE_REBUILD_MAX_AGE_MS = 15 * 60 * 1000;
 /** Soft cap on retained blob bytes per conversation (images + turn blobs). */
 export const MAX_CONVERSATION_BLOB_BYTES = 128 * 1024 * 1024;
 export const MAX_ACTIVE_BLOB_BYTES = MAX_CONVERSATION_BLOB_BYTES;
-// Entry bound, evicted oldest-first alongside the byte bound. Turn blobs run a
-// couple of KB, so this is reached long before the byte cap on any conversation
-// that lives for a few hundred tool calls; it bounds Map overhead, and matches
-// the number of blobs the run journal is willing to persist.
-export const MAX_ACTIVE_BLOB_ENTRIES = 512;
+// Entry bound, evicted oldest-first alongside the byte bound. 512 was reached
+// around 20 turns (storeSize 514) while the 128 MiB byte cap still had headroom;
+// the miss dropped the checkpoint and the rebuild overflowed Cursor (~1.5 MiB /
+// ~388k tokens). 4096 keeps Map overhead bounded without punching holes in long
+// agent sessions. The journal persists the live store under the same entry cap.
+export const MAX_ACTIVE_BLOB_ENTRIES = 4096;
 export const MAX_INDIVIDUAL_BLOB_BYTES = 32 * 1024 * 1024;
 
 /**

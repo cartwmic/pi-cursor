@@ -41,6 +41,7 @@ export {
   appendDriftDiagnostic,
   enhanceCursorStreamError,
   isAuthErrorMessage,
+  isContextOverflowMessage,
   isProtocolMismatchMessage,
 } from "./protocol.js";
 export {
