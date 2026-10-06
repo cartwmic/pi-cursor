@@ -150,6 +150,31 @@ describe("Pi-only local tool routing", () => {
     expect(policy).not.toContain("No Pi MCP tools are registered");
   });
 
+  it("names codemode coverage when codemode is exposed without a direct read/bash tool", () => {
+    const reason = nativeToolRejectReason("shellStreamArgs", tools("codemode", "subagent"));
+    expect(reason).toContain("mcp_pi_codemode");
+    expect(reason).toContain("codemode tool covers local operations");
+    expect(reason).toContain("tools.bash");
+    const policy = localToolPolicyText(tools("codemode", "subagent"));
+    expect(policy).toContain("codemode tool covers local operations");
+    expect(policy).toContain("tools.read");
+    expect(nativeToolRejectReason("shellArgs", tools("bash"))).not.toContain(
+      "codemode tool covers local operations",
+    );
+    expect(localToolPolicyText(tools("bash"))).not.toContain("codemode tool covers");
+  });
+
+  it("tells the model to call directly and gives the raw-name fallback under the pi namespace", () => {
+    const reason = nativeToolRejectReason("readArgs", tools("read", "bash"));
+    expect(reason).toContain("do not search any tool catalog");
+    expect(reason).toContain("not proof that they are unregistered");
+    expect(reason).toContain("reachable under the pi namespace");
+    expect(reason).toContain("read instead of mcp_pi_read");
+    const policy = localToolPolicyText(tools("bash"));
+    expect(policy).toContain("do not search any tool catalog");
+    expect(policy).toContain("bash instead of mcp_pi_bash");
+  });
+
   it("keeps the prompt compact without hiding custom tools behind a no-tools claim", () => {
     const policy = localToolPolicyText(tools("bash", "web_search", "search_repository"));
     expect(policy).toContain("mcp_pi_bash");
