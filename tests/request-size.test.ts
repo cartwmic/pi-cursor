@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { fromBinary } from "@bufbuild/protobuf";
+import { fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   AgentClientMessageSchema,
+  ExecServerMessageSchema,
+  McpToolDefinitionSchema,
   type ExecClientControlMessage,
   type ExecClientThrow,
 } from "../src/proto/agent_pb.js";
@@ -113,33 +115,33 @@ describe("slim tools for Cursor", () => {
     expect(isSlimToolsEnabled("false")).toBe(false);
   });
 
-  it("removes schema prose but preserves the executable contract", () => {
+  it("compacts tool prose but preserves argument descriptions and the executable contract", () => {
     const slim = slimOpenAIToolsForCursor(fatTools(1));
     const fn = slim[0]!.function;
     expect((fn.description || "").length).toBeLessThanOrEqual(120);
     const parameters = fn.parameters as any;
     const path = parameters.properties.path;
-    expect(path.description).toBeUndefined();
+    expect(path.description).toBe("A very long parameter description. ".repeat(30));
     expect(path.type).toBe("string");
     expect(path.enum).toHaveLength(80);
     expect(parameters.required).toEqual(["path"]);
   });
 
-  it("materially shrinks MCP schema payload vs raw tools", () => {
+  it("shrinks the tool payload without discarding argument descriptions", () => {
     const raw = fatTools(20);
     const prev = process.env.PI_CURSOR_SLIM_TOOLS;
     try {
       process.env.PI_CURSOR_SLIM_TOOLS = "0";
       const rawMcp = buildMcpToolDefinitions(raw);
       let rawBytes = 0;
-      for (const t of rawMcp) rawBytes += t.inputSchema?.byteLength ?? 0;
+      for (const t of rawMcp) rawBytes += toBinary(McpToolDefinitionSchema, t).byteLength;
 
       process.env.PI_CURSOR_SLIM_TOOLS = "1";
       const slimMcp = buildMcpToolDefinitions(raw);
       let slimBytes = 0;
-      for (const t of slimMcp) slimBytes += t.inputSchema?.byteLength ?? 0;
+      for (const t of slimMcp) slimBytes += toBinary(McpToolDefinitionSchema, t).byteLength;
 
-      expect(slimBytes).toBeLessThan(rawBytes * 0.5);
+      expect(slimBytes).toBeLessThan(rawBytes);
     } finally {
       if (prev === undefined) delete process.env.PI_CURSOR_SLIM_TOOLS;
       else process.env.PI_CURSOR_SLIM_TOOLS = prev;
@@ -187,9 +189,8 @@ describe("native Cursor exec steering", () => {
     expect((control.message.value as ExecClientThrow).id).toBe(12);
   });
 
-  it("handles planning, execution, reflection, VM setup, and truncated tool call execs with success results", () => {
+  it("handles grind execution, reflection, VM setup, and truncated tool call execs with success results", () => {
     const cases = [
-      ["startGrindPlanningArgs", "startGrindPlanningResult"],
       ["startGrindExecutionArgs", "startGrindExecutionResult"],
       ["reflectArgs", "reflectResult"],
       ["setupVmEnvironmentArgs", "setupVmEnvironmentResult"],
@@ -224,6 +225,53 @@ describe("native Cursor exec steering", () => {
         $unknown: [{ no: 28, wireType: 2, data: new Uint8Array(9) }],
       }),
     ).toBe("28:wt2:9b");
+  });
+
+  // Independent of SubagentArgsSchema. Field 28 is Cursor's Task/subagent request.
+  // The payload includes a prompt and an API key; the reply must not echo either.
+  it("rejects a hand-encoded exec field 28 as a typed subagent error", () => {
+    const wire = Buffer.from(
+      "08077a0165e201300a0463616c6c2216646f2d6e6f742d6c6f672d50524f4d50542d3966336352100a0e736b2d746573742d736563726574",
+      "hex",
+    );
+    const exec = fromBinary(ExecServerMessageSchema, wire);
+    expect(exec.message.case).toBe("subagentArgs");
+    expect(exec.$unknown ?? []).toEqual([]);
+    if (exec.message.case !== "subagentArgs" || !exec.message.value) {
+      throw new Error("field 28 did not decode as subagentArgs");
+    }
+    expect(exec.message.value.prompt).toBe("do-not-log-PROMPT-9f3c");
+    expect(exec.message.value.credentials.case).toBe("apiKeyCredentials");
+
+    const frames: Uint8Array[] = [];
+    const handled = serverMessageInternals.handleExecMessageInner(
+      exec,
+      [],
+      (frame: Uint8Array) => frames.push(frame),
+      () => {
+        throw new Error("should not execute");
+      },
+    );
+    expect(handled).toBe(true);
+    expect(frames).toHaveLength(1);
+    const raw = Buffer.from(frames[0]!);
+    expect(raw.includes(Buffer.from("do-not-log-PROMPT-9f3c"))).toBe(false);
+    expect(raw.includes(Buffer.from("sk-test-secret"))).toBe(false);
+    const answer = fromBinary(AgentClientMessageSchema, frames[0]!.subarray(5));
+    expect(answer.message.case).toBe("execClientMessage");
+    if (answer.message.case !== "execClientMessage" || !answer.message.value) {
+      throw new Error("missing exec reply");
+    }
+    const result = answer.message.value.message;
+    expect(result.case).toBe("subagentResult");
+    if (result.case !== "subagentResult" || !result.value.result.value) {
+      throw new Error("missing subagent result");
+    }
+    expect(result.value.result.case).toBe("error");
+    if (result.value.result.case !== "error") throw new Error("missing subagent error");
+    expect(result.value.result.value.error).toMatch(/does not spawn Cursor subagents/);
+    expect(result.value.result.value.error).not.toContain("do-not-log-PROMPT-9f3c");
+    expect(result.value.result.value.error).not.toContain("sk-test-secret");
   });
 });
 
