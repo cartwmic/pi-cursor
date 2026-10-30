@@ -10,7 +10,11 @@
  * from re-uploading every attachment on every turn.
  */
 
-import { localToolPolicyText } from "./local-tool-policy.js";
+import {
+  availableToolNamesFor,
+  localToolPolicyText,
+  wireMcpToolDefinitions,
+} from "./local-tool-policy.js";
 import { create, fromBinary, fromJson, toBinary, toJson, type JsonValue } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
 import { createHash } from "node:crypto";
@@ -227,7 +231,8 @@ export function summarizeRequestSize(input: {
   for (const bytes of input.blobStore.values()) blobBytes += bytes.byteLength;
   let mcpSchemaBytes = 0;
   for (const tool of input.mcpTools) {
-    mcpSchemaBytes += tool.inputSchema?.byteLength ?? 0;
+    mcpSchemaBytes += tool.inputSchema ? toBinary(ValueSchema, tool.inputSchema).byteLength : 0;
+    mcpSchemaBytes += Buffer.byteLength(tool.inputSchemaJson ?? "", "utf8");
     mcpSchemaBytes += (tool.description?.length ?? 0) + (tool.name?.length ?? 0);
   }
   // `toolJsonChars` reports the raw Pi surface for comparison only. Do not add
@@ -589,7 +594,11 @@ export function buildCursorRequestFromParts(
   // With history enabled, merge the capability policy into the existing rules
   // message. Without history, retain only the policy as a separate user message.
   const promptMessages = isPromptHistoryEnabled()
-    ? buildRootPromptMessages(`${systemPrompt}\n\n${localToolPolicyText(mcpTools)}`, turns)
+    ? buildRootPromptMessages(
+        `${systemPrompt}\n\n${localToolPolicyText(mcpTools)}`,
+        turns,
+        availableToolNamesFor(mcpTools),
+      )
     : [systemPromptRootMessage(localToolPolicyText(mcpTools))];
   const promptBlobIds = promptMessages.map((message) =>
     storeAsBlob(encodeRootPromptMessage(message), blobStore),
@@ -649,7 +658,7 @@ export function buildCursorRequestFromParts(
     action,
     requestedModel,
     conversationId,
-    mcpTools: create(McpToolsSchema, { mcpTools }),
+    mcpTools: create(McpToolsSchema, { mcpTools: wireMcpToolDefinitions(mcpTools) }),
   });
   const clientMessage = create(AgentClientMessageSchema, {
     message: { case: "runRequest", value: runRequest },
