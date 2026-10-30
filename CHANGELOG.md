@@ -2,6 +2,11 @@
 
 ## [Unreleased — fork]
 
+- **Pi tools are reachable under codemode-only.** Cursor no longer lists MCP tools as direct functions; models reach them through `GetDynamicTools` / `CallDynamicTool` in the `pi` namespace. The local-tool policy now gives that recipe, including for `codemode` and one `Promise.all` script for independent work, so models stop refusing with "codemode is not available".
+- **A dropped connection no longer looks like a finished reply.** A stream that ends without `turnEnded` (and without a Pi tool call) is transport loss: the turn retries from the checkpoint when it can, otherwise it fails with a retriable "connection lost" error that Pi's auto-retry picks up.
+- **Cost is `0` by default.** Cursor bills plan quota, not tokens. `PI_CURSOR_API_COST_ESTIMATE=1` restores API-rate estimates.
+- **Context tokens are estimated from the characters Cursor counted.** Cursor's `usedTokens` is chars / ~2.44 (its `tokenDetails` breakdown, now in `agent.proto`), which over-reported context and made Pi compact early. The provider now divides counted characters by `PI_CURSOR_CHARS_PER_TOKEN` (default `3.5`).
+
 - Keep context overflow separate from wire-drift and retain up to 4096 conversation blobs.
 - Recover additive checkpoint fields while retaining Pi client identity on fields 21/22.
 

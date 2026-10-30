@@ -1,5 +1,10 @@
 /**
  * Model token pricing and cost estimation table.
+ *
+ * Cursor bills these models against the plan's quota, not per token, so the
+ * provider reports zero cost by default (see `cursorModelCost`). The API-rate
+ * table stays for `PI_CURSOR_API_COST_ESTIMATE=1`, for people who want an
+ * "if this were the API" figure.
  */
 
 export interface ModelCost {
@@ -77,6 +82,18 @@ export const MODEL_COST_PATTERNS: Array<{ match: (id: string) => boolean; cost: 
   { match: (id) => /grok/i.test(id), cost: MODEL_COST_TABLE["grok-4.20"] ?? DEFAULT_COST },
   { match: (id) => /kimi/i.test(id), cost: MODEL_COST_TABLE["kimi-k2.5"] ?? DEFAULT_COST },
 ];
+
+export const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+/** Cost Pi records for a Cursor model: zero (plan quota) unless the API-rate estimate is opted into. */
+export function cursorModelCost(
+  modelId: string,
+  apiEstimate = process.env.PI_CURSOR_API_COST_ESTIMATE,
+): ModelCost {
+  return apiEstimate === "1" || apiEstimate === "true"
+    ? estimateModelCost(modelId)
+    : { ...ZERO_COST };
+}
 
 export function estimateModelCost(modelId: string): ModelCost {
   const normalized = modelId.toLowerCase();

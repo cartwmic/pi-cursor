@@ -477,6 +477,23 @@ message ConversationSummaryArchive {
 message ConversationTokenDetails {
   uint32 used_tokens = 1;
   uint32 max_tokens = 2;
+  // Observed 2026-10-30; not in the upstream schema.
+  optional ConversationTokenBreakdown breakdown = 3;
+}
+
+// Per-category breakdown of used_tokens (system_prompt, tools, rules, conversation, ...).
+// Observed 2026-10-30: tokens is chars / ~2.44 in every category, a character heuristic.
+message ConversationTokenBreakdown {
+  uint32 used_tokens = 1;
+  uint32 max_tokens = 2;
+  repeated ConversationTokenCategory categories = 3;
+}
+
+message ConversationTokenCategory {
+  string key = 1;
+  string label = 2;
+  uint32 tokens = 3;
+  uint32 chars = 4;
 }
 
 message FileState {
