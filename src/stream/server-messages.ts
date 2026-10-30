@@ -14,6 +14,8 @@
 import { create, toBinary, type MessageInitShape } from "@bufbuild/protobuf";
 import { pathToFileURL } from "node:url";
 
+import { countedChars, estimateContextTokens } from "./token-estimate.js";
+
 import {
   AgentClientMessageSchema,
   ComputerUseErrorSchema,
@@ -256,8 +258,15 @@ export function processServerMessage(
   }
   if (msgCase === "conversationCheckpointUpdate") {
     const stateStructure = msg.message.value as ConversationStateStructure;
-    if ((stateStructure as any).tokenDetails) {
-      const used = (stateStructure as any).tokenDetails.usedTokens;
+    const details = stateStructure.tokenDetails;
+    if (details) {
+      const used = estimateContextTokens(details);
+      debugLog("native.context_tokens", {
+        cursorUsedTokens: details.usedTokens,
+        cursorMaxTokens: details.maxTokens,
+        countedChars: countedChars(details),
+        estimatedTokens: used,
+      });
       state.totalTokens = used;
       state.contextTokens = used;
       // Recorded for the *next* turn on this conversation, so its cache
