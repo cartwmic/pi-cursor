@@ -439,6 +439,108 @@ describe("completed-turn connection close", () => {
     expect(calls).toEqual(["done:stop"]);
   });
 
+  function streamDoneHarness() {
+    const calls: string[] = [];
+    const writer = {
+      output: {} as never,
+      closed: false,
+      start() {},
+      text() {},
+      thinking() {},
+      toolCall() {},
+      done(reason: string) {
+        calls.push(`done:${reason}`);
+        this.closed = true;
+      },
+      error(message: string) {
+        calls.push(`error:${message}`);
+        this.closed = true;
+      },
+    };
+    let onData: (chunk: Buffer) => void = () => {};
+    let onClose: (code: number) => void = () => {};
+    let onStreamDone: () => void = () => {};
+    let kills = 0;
+    const bridge = {
+      // h2-session's kill destroys the session and reports exit 1 through onClose.
+      proc: {
+        kill: () => {
+          kills++;
+          onClose(1);
+          return true;
+        },
+      },
+      alive: true,
+      lastStderr: () => "",
+      write: () => {},
+      end: () => {},
+      onData: (cb: (chunk: Buffer) => void) => {
+        onData = cb;
+      },
+      onClose: (cb: (code: number) => void) => {
+        onClose = cb;
+      },
+      onStreamDone: (cb: () => void) => {
+        onStreamDone = cb;
+      },
+    };
+    const heartbeatTimer = setInterval(() => {}, 60_000);
+    __testInternals.writeNativeStream(
+      bridge,
+      heartbeatTimer,
+      new Map(),
+      [],
+      {} as never,
+      "claude-sonnet-5-5",
+      "bridge-key-done",
+      "conv-key-done",
+      [],
+      { userText: "hi", steps: [] },
+      writer as never,
+      undefined,
+      "req-1",
+      undefined,
+      0,
+    );
+    return {
+      calls,
+      kills: () => kills,
+      data: (chunk: Buffer) => onData(chunk),
+      streamDone: () => onStreamDone(),
+      dispose: () => clearInterval(heartbeatTimer),
+    };
+  }
+
+  it("reports a stream that ends without turnEnded as transport loss, not a finished reply", () => {
+    const h = streamDoneHarness();
+    h.data(
+      updateFrame({
+        case: "textDelta",
+        value: create(TextDeltaUpdateSchema, { text: "The bicy" }),
+      }),
+    );
+    // A dropped socket can reach the bridge as a clean HTTP/2 end with no turnEnded.
+    h.streamDone();
+    h.dispose();
+    expect(h.kills()).toBe(1);
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]).toMatch(
+      /^error:Cursor connection lost: the stream ended before the turn finished/,
+    );
+  });
+
+  it("still finishes a stream that ends after turnEnded as a completed turn", () => {
+    const h = streamDoneHarness();
+    h.data(
+      updateFrame({ case: "textDelta", value: create(TextDeltaUpdateSchema, { text: "done" }) }),
+    );
+    h.data(updateFrame({ case: "turnEnded", value: create(TurnEndedUpdateSchema, {}) }));
+    h.streamDone();
+    h.dispose();
+    expect(h.kills()).toBe(0);
+    expect(h.calls).toEqual(["done:stop"]);
+  });
+
   it("fails a turn parked on an unanswerable exec even while heartbeats keep arriving", async () => {
     const calls: string[] = [];
     const written: Uint8Array[] = [];
