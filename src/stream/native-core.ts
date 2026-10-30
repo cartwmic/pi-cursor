@@ -98,6 +98,10 @@ export {
   type BuildCursorRequestOptions,
 } from "./request-build.js";
 import { hashSystemPrompt } from "./root-prompt.js";
+
+/** Bridge diagnostic for a stream that ended before `turnEnded`; RESET_RE classifies it as retriable. */
+const END_WITHOUT_TURN_END_MESSAGE =
+  "Cursor connection lost: the stream ended before the turn finished (connection reset), so the reply was cut off.";
 export { isSlimToolsEnabled, slimOpenAIToolsForCursor } from "./tool-schema.js";
 import { buildMcpToolDefinitions } from "./tool-schema.js";
 export {
@@ -900,6 +904,8 @@ function writeNativeStream(
   /** Set when a Cursor end-stream error is being retried through the `onClose` path. */
   let retriableEndError: string | null = null;
   let emittedUserVisibleContent = false;
+  /** Set when the HTTP/2 stream ended before `turnEnded`; `onClose` reports it as a lost connection. */
+  let endedWithoutTurnEnd = false;
   // Only execs the client was actually told about may be recorded as pending: recovery matches the
   // snapshot against the tool results the client sends back, and it can only send back what it saw.
   const emittedExecs: PendingExec[] = [];
@@ -1161,6 +1167,34 @@ function writeNativeStream(
   const finalizeSuccessfulStream = () => {
     if (stopLocalToolLoop()) return;
     if (cancelled || streamFinalized) return;
+    // A healthy turn always carries `turnEnded` (or pauses on a Pi tool call) before the
+    // HTTP/2 stream ends. A stream that ends without either was cut off: a dropped socket
+    // (Wi-Fi change, VPN reconnect, sleep) can surface as a clean `end`, and finishing it
+    // as `stop` showed a truncated reply as if it were complete. Kill the bridge so
+    // `onClose` treats it as transport loss: retry from the checkpoint, or report an error.
+    if (!state.turnEnded && !mcpExecReceived) {
+      endedWithoutTurnEnd = true;
+      debugLog("native.stream.end_without_turn_end", {
+        requestId,
+        bridgeKey,
+        convKey,
+        emittedUserVisibleContent,
+        hasCheckpoint: !!checkpointRef.current,
+      });
+      lifecycleLog("stream_end_without_turn_end", {
+        requestId,
+        bridgeKey: bridgeKeyPrefix(bridgeKey),
+        convKey,
+        emittedUserVisibleContent,
+        hasCheckpoint: !!checkpointRef.current,
+      });
+      try {
+        bridge.proc.kill();
+      } catch {
+        // Already exiting; `onClose` still runs.
+      }
+      return;
+    }
     streamFinalized = true;
     idleWatchdog.clear();
     clearInterval(heartbeatTimer);
@@ -1482,7 +1516,11 @@ function writeNativeStream(
     if (code !== 0 && !completedTurnClose) {
       const failure = classifyBridgeExit({
         exitCode: code,
-        stderr: typeof bridge.lastStderr === "function" ? bridge.lastStderr() : "",
+        stderr: endedWithoutTurnEnd
+          ? `${END_WITHOUT_TURN_END_MESSAGE} ${typeof bridge.lastStderr === "function" ? bridge.lastStderr() : ""}`.trim()
+          : typeof bridge.lastStderr === "function"
+            ? bridge.lastStderr()
+            : "",
         // Cursor's own end-stream error names the failure far better than the exit code does.
         ...(retriableEndError ? { endErrorMessage: retriableEndError } : {}),
       });
