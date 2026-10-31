@@ -13,6 +13,13 @@
  * estimate: dense code runs closer to 3, plain prose closer to 4. Without the
  * breakdown, keep Cursor's own number, which errs high (compacts early, never
  * late).
+ *
+ * Per-category ratios were considered and rejected: the categories split by
+ * source (system prompt, tools, conversation), not by content, and code and
+ * prose share the conversation category. Without a tokenizer any per-category
+ * ratio would be a guess. Cursor's `maxTokens` is not a ceiling to clamp to
+ * either: on 2026-10-30 Haiku answered a request Cursor counted at 380154 of
+ * 300000 with both its first and last lines intact.
  */
 import type { ConversationTokenDetails } from "../proto/agent_pb.js";
 
