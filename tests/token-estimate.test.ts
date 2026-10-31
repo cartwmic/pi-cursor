@@ -9,6 +9,12 @@ import {
 import { cursorModelCost, estimateModelCost } from "../src/models/cost.js";
 import { modelConfig } from "../src/models/processing.js";
 import {
+  AgentServerMessageSchema,
+  ConversationStateStructureSchema,
+} from "../src/proto/agent_pb.js";
+import { processServerMessage } from "../src/stream/server-messages.js";
+import { conversationStates } from "../src/stream/session-state.js";
+import {
   countedChars,
   DEFAULT_CHARS_PER_TOKEN,
   estimateContextTokens,
@@ -50,6 +56,50 @@ describe("Cursor context token estimate", () => {
   it("keeps Cursor's number when it sends no breakdown", () => {
     const details = create(ConversationTokenDetailsSchema, { usedTokens: 1234, maxTokens: 300000 });
     expect(estimateContextTokens(details)).toBe(1234);
+  });
+
+  it("is what a checkpoint puts on the stream state and the stored conversation", () => {
+    const convKey = "conv-token-wiring";
+    conversationStates.set(convKey, {
+      conversationId: "c",
+      checkpoint: null,
+      blobStore: new Map(),
+      lastAccessMs: 0,
+    } as never);
+    const state = {
+      toolCallIndex: 0,
+      pendingExecs: [],
+      outputTokens: 0,
+      totalTokens: 0,
+      turnEnded: false,
+    };
+    try {
+      const msg = create(AgentServerMessageSchema, {
+        message: {
+          case: "conversationCheckpointUpdate",
+          value: create(ConversationStateStructureSchema, { tokenDetails: capturedDetails() }),
+        },
+      });
+      processServerMessage(
+        msg,
+        new Map(),
+        [],
+        () => {},
+        state as never,
+        () => {},
+        () => {},
+        () => {},
+        undefined,
+        undefined,
+        convKey,
+      );
+
+      const expected = Math.ceil(164386 / DEFAULT_CHARS_PER_TOKEN);
+      expect(state).toMatchObject({ contextTokens: expected, totalTokens: expected });
+      expect(conversationStates.get(convKey)?.lastContextTokens).toBe(expected);
+    } finally {
+      conversationStates.delete(convKey);
+    }
   });
 
   it("round-trips the breakdown through the schema", () => {
