@@ -43,6 +43,8 @@ import type { StoredConversation } from "../src/stream/types.js";
 import {
   cleanupSessionState,
   conversationStates,
+  deriveBridgeKeyFromSessionId,
+  releaseAbortedToolBridge,
   deriveConversationKeyFromSessionId,
 } from "../src/stream/session-state.js";
 import {
@@ -223,6 +225,30 @@ describe("durable run journal", () => {
     expect(conversationStates.has(convKey)).toBe(false);
     const loaded = readConversationJournal(convKey);
     expect(loaded?.conversationId).toBe("conv-journal-1");
+  });
+});
+
+describe("aborted tool execution", () => {
+  it("releases the bridge parked for tool results once the aborted run settles", () => {
+    const sessionId = "session-aborted-tool";
+    const bridgeKey = deriveBridgeKeyFromSessionId(sessionId);
+    let ended = 0;
+    const heartbeatTimer = setInterval(() => {}, 60_000);
+    activeBridges.set(bridgeKey, {
+      bridge: { alive: true, end: () => ended++ } as never,
+      heartbeatTimer,
+    } as never);
+    const conv = deriveConversationKeyFromSessionId(sessionId);
+    conversationStates.set(conv, { conversationId: "c" } as never);
+
+    expect(releaseAbortedToolBridge(sessionId)).toBe(true);
+    expect(ended).toBe(1);
+    expect(activeBridges.has(bridgeKey)).toBe(false);
+    // The conversation is kept so the next prompt continues it.
+    expect(conversationStates.has(conv)).toBe(true);
+    expect(releaseAbortedToolBridge(sessionId)).toBe(false);
+    conversationStates.delete(conv);
+    clearInterval(heartbeatTimer);
   });
 });
 
