@@ -8,6 +8,7 @@
 - **Cost is `0` by default.** Cursor bills plan quota, not tokens. `PI_CURSOR_API_COST_ESTIMATE=1` restores API-rate estimates.
 - **Context tokens are estimated from the characters Cursor counted.** Cursor's `usedTokens` is chars / ~2.44 (its `tokenDetails` breakdown, now in `agent.proto`), which over-reported context and made Pi compact early. The provider now divides counted characters by `PI_CURSOR_CHARS_PER_TOKEN` (default `3.5`).
 - **A Cursor quota or rate limit is no longer reported as context overflow.** `resource_exhausted` alone (Cursor usually sends just "Error") now gets a limit hint that Pi retries as a rate limit; quota, usage-limit, subscription or billing wording gets a "quota exceeded" hint that Pi does not retry. Only size wording ("context length", "request too large", "prompt too long", …) gets the `/compact` hint.
+- **Checkpoint field 46 is modelled.** Every live checkpoint carries it (VARINT, value 1), so `conversationCheckpointUpdate.payload#46` was logged as wire drift on every turn. It is now `unknown_field_46` in `agent.proto`.
 - **Output tokens are never reported as zero for a reply that streamed text.** Cursor's `tokenDelta` is missing for short replies, so they reported `output: 0`. Output is now the larger of Cursor's sum and the streamed text, thinking and tool-call characters at the same chars-per-token rule.
 
 - Keep context overflow separate from wire-drift and retain up to 4096 conversation blobs.

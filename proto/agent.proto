@@ -648,6 +648,9 @@ message ConversationStateStructure {
   // Names unrecovered; recovered so $unknown stops flagging every checkpoint.
   optional bytes unknown_field_38 = 38;
   optional uint64 unknown_field_39 = 39;
+  // Every live checkpoint since 2026-10 (545 of 545 in the 2026-10-30 captures) carries field 46 as
+  // a VARINT with value 1. Name unrecovered; modelled so it stops flagging wire drift every turn.
+  optional uint64 unknown_field_46 = 46;
 }
 
 message ThinkingDetails {

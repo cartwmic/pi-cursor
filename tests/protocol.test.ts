@@ -116,6 +116,16 @@ describe("protocol helpers", () => {
     expect(checkpoint.$unknown ?? []).toEqual([]);
   });
 
+  it("decodes live checkpoint field 46 without unknown-field drift", () => {
+    // field 46, VARINT 1: the bytes every 2026-10 checkpoint carried.
+    const checkpoint = fromBinary(
+      ConversationStateStructureSchema,
+      new Uint8Array([0xf0, 0x02, 0x01]),
+    );
+    expect(checkpoint.unknownField46).toBe(1n);
+    expect(checkpoint.$unknown ?? []).toEqual([]);
+  });
+
   it("parses connect end-stream errors", () => {
     const err = parseConnectEndStream(
       new TextEncoder().encode(JSON.stringify({ error: { code: "internal", message: "boom" } })),
