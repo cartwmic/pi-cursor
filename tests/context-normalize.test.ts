@@ -91,6 +91,56 @@ describe("context-mode normalization", () => {
     expect(system).toMatch(/hindsight_memories/);
   });
 
+  describe("a turn started by an extension message alone", () => {
+    // Pi's custom-message-marker patch wraps a triggerTurn custom message once the context is
+    // rebuilt from the session, so the coordinator's event arrives wrapped, with auto-recall after it.
+    const event = [
+      { type: "text", text: "<injected-context>\n" },
+      {
+        type: "text",
+        text: "[coordinator event 2232] source: matrix\n\nhave we resumed all threads?",
+      },
+      { type: "text", text: "\n</injected-context>" },
+    ];
+
+    it("keeps the wrapped message as the task instead of failing with no user text", () => {
+      const parsed = parseMessages([
+        { role: "system", content: "You are Pi." },
+        { role: "user", content: "earlier task" },
+        { role: "assistant", content: "done" },
+        { role: "user", content: event },
+        { role: "user", content: injectedContextInjection },
+      ]);
+      expect(parsed.userText).toContain("[coordinator event 2232]");
+      expect(parsed.userText).toContain("have we resumed all threads?");
+      expect(parsed.userText).toContain("hindsight_memories");
+      expect(parsed.userText).not.toContain("<injected-context>");
+      expect(parsed.turns.map((t) => t.userText)).toEqual(["earlier task"]);
+    });
+
+    it("keeps such turns in history too, with their replies", () => {
+      const parsed = parseMessages([
+        { role: "user", content: event },
+        { role: "assistant", content: "yes, all resumed" },
+        { role: "user", content: "thanks" },
+      ]);
+      expect(parsed.userText).toBe("thanks");
+      expect(parsed.turns).toHaveLength(1);
+      expect(parsed.turns[0]?.userText).toContain("have we resumed all threads?");
+    });
+
+    it("still folds an injection that lands after a tool result", () => {
+      const normalized = normalizeMessagesForCursor([
+        { role: "user", content: "run it" },
+        { role: "assistant", content: "", tool_calls: [{ id: "c1" }] },
+        { role: "tool", tool_call_id: "c1", content: "ok" },
+        { role: "user", content: injectedContextInjection },
+      ]);
+      expect(normalized.filter((m) => m.role === "user")).toHaveLength(1);
+      expect(String(normalized[0]?.content)).toMatch(/hindsight_memories/);
+    });
+  });
+
   it("keeps a real prompt that has a trailing <injected-context> block in the same message", () => {
     const mixed = `run the tests\n\n${injectedContextInjection}`;
     const { userText, sideText } = splitUserTextAndSideChannel(mixed);

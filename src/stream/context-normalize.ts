@@ -250,7 +250,67 @@ function rebuildUserContent(
  * Fold pure side-channel user messages into the system prompt and keep the
  * real user turns as the task. Mixed user messages are split in place.
  */
-export function normalizeMessagesForCursor(messages: OpenAIMessage[]): OpenAIMessage[] {
+/** Messages promoted to the turn's task; the side-channel split must not fold them again. */
+const promotedTurns = new WeakSet<OpenAIMessage>();
+
+const INJECTED_CONTEXT_WRAPPER = /^\s*<injected-context>\s*|\s*<\/injected-context>\s*$/g;
+
+function userRunHasTask(run: OpenAIMessage[]): boolean {
+  return run.some((msg) => {
+    const text = textContent(msg.content);
+    return contentHasImageParts(msg.content) || !!splitUserTextAndSideChannel(text).userText.trim();
+  });
+}
+
+/**
+ * A turn can be started by an extension message alone: Pi delivers `sendMessage(...,
+ * { triggerTurn: true })` as a custom message, and the custom-message-marker patch wraps it in
+ * `<injected-context>` whenever it cannot tell it was the prompt (the flag is not persisted, so
+ * every rebuilt context wraps it). Folding such a run into the system prompt leaves the turn with
+ * no user text and the request fails with "No user message found". When a run of user messages
+ * that opens a turn (after an assistant reply, or first) has no task text at all, it is the task:
+ * keep it as one user message, unwrapped. Runs after a tool result are mid-turn injections and
+ * still fold.
+ */
+function promoteInjectedOnlyTurns(messages: OpenAIMessage[]): OpenAIMessage[] {
+  const out: OpenAIMessage[] = [];
+  for (let i = 0; i < messages.length;) {
+    if (messages[i].role !== "user") {
+      out.push(messages[i]);
+      i++;
+      continue;
+    }
+    let end = i;
+    while (end < messages.length && messages[end].role === "user") end++;
+    const run = messages.slice(i, end);
+    i = end;
+    const opensTurn =
+      out.every((m) => m.role === "system") || lastNonSystemRole(out) === "assistant";
+    if (!opensTurn || userRunHasTask(run)) {
+      out.push(...run);
+      continue;
+    }
+    const text = run
+      .map((m) => textContent(m.content).replace(INJECTED_CONTEXT_WRAPPER, "").trim())
+      .filter(Boolean)
+      .join("\n\n");
+    if (!text) continue;
+    const promoted: OpenAIMessage = { role: "user", content: text };
+    promotedTurns.add(promoted);
+    out.push(promoted);
+  }
+  return out;
+}
+
+function lastNonSystemRole(messages: OpenAIMessage[]): OpenAIRole | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== "system") return messages[i].role;
+  }
+  return undefined;
+}
+
+export function normalizeMessagesForCursor(input: OpenAIMessage[]): OpenAIMessage[] {
+  const messages = promoteInjectedOnlyTurns(input);
   const systemParts: string[] = [];
   const sideParts: string[] = [];
   const rest: OpenAIMessage[] = [];
@@ -262,7 +322,7 @@ export function normalizeMessagesForCursor(messages: OpenAIMessage[]): OpenAIMes
       continue;
     }
 
-    if (msg.role === "user") {
+    if (msg.role === "user" && !promotedTurns.has(msg)) {
       const text = textContent(msg.content);
       if (!text.trim()) {
         rest.push(msg);
