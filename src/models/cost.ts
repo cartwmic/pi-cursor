@@ -7,6 +7,8 @@
  * "if this were the API" figure.
  */
 
+import { cursorEnvBoolean } from "../utils/util.js";
+
 export interface ModelCost {
   input: number;
   output: number;
@@ -88,11 +90,9 @@ export const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWr
 /** Cost Pi records for a Cursor model: zero (plan quota) unless the API-rate estimate is opted into. */
 export function cursorModelCost(
   modelId: string,
-  apiEstimate = process.env.PI_CURSOR_API_COST_ESTIMATE,
+  apiEstimate = cursorEnvBoolean("API_COST_ESTIMATE"),
 ): ModelCost {
-  return apiEstimate === "1" || apiEstimate === "true"
-    ? estimateModelCost(modelId)
-    : { ...ZERO_COST };
+  return apiEstimate ? estimateModelCost(modelId) : { ...ZERO_COST };
 }
 
 export function estimateModelCost(modelId: string): ModelCost {

@@ -1,5 +1,5 @@
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ConversationTokenBreakdownSchema,
@@ -7,6 +7,7 @@ import {
   ConversationTokenDetailsSchema,
 } from "../src/proto/agent_pb.js";
 import { cursorModelCost, estimateModelCost } from "../src/models/cost.js";
+import { modelConfig } from "../src/models/processing.js";
 import {
   countedChars,
   DEFAULT_CHARS_PER_TOKEN,
@@ -76,8 +77,10 @@ describe("Cursor context token estimate", () => {
 });
 
 describe("Cursor model cost", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
   it("is zero by default because Cursor bills plan quota", () => {
-    expect(cursorModelCost("claude-opus-5-5", undefined)).toEqual({
+    expect(cursorModelCost("claude-opus-5-5", false)).toEqual({
       input: 0,
       output: 0,
       cacheRead: 0,
@@ -86,6 +89,31 @@ describe("Cursor model cost", () => {
   });
 
   it("uses API-rate estimates only when opted in", () => {
-    expect(cursorModelCost("claude-opus-5-5", "1")).toEqual(estimateModelCost("claude-opus-5-5"));
+    expect(cursorModelCost("claude-opus-5-5", true)).toEqual(estimateModelCost("claude-opus-5-5"));
+  });
+
+  it("reads PI_CURSOR_API_COST_ESTIMATE, defaulting to zero cost when it is unset", () => {
+    vi.stubEnv("PI_CURSOR_API_COST_ESTIMATE", "");
+    vi.stubEnv("CURSOR_API_COST_ESTIMATE", "");
+    vi.stubEnv("PI_CURSOR_PROVIDER_API_COST_ESTIMATE", "");
+    expect(cursorModelCost("claude-opus-5-5").input).toBe(0);
+    vi.stubEnv("PI_CURSOR_API_COST_ESTIMATE", "1");
+    expect(cursorModelCost("claude-opus-5-5")).toEqual(estimateModelCost("claude-opus-5-5"));
+    vi.stubEnv("PI_CURSOR_API_COST_ESTIMATE", "off");
+    expect(cursorModelCost("claude-opus-5-5").input).toBe(0);
+  });
+
+  it("is what Pi's model rows carry", () => {
+    const row = {
+      id: "claude-opus-5-5",
+      name: "Claude Opus 5.5",
+      supportsEffort: false,
+      contextWindow: 300_000,
+      maxTokens: 128_000,
+    } as never as Parameters<typeof modelConfig>[0];
+    vi.stubEnv("PI_CURSOR_API_COST_ESTIMATE", "");
+    expect(modelConfig(row).cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    vi.stubEnv("PI_CURSOR_API_COST_ESTIMATE", "1");
+    expect(modelConfig(row).cost).toEqual(estimateModelCost("claude-opus-5-5"));
   });
 });
