@@ -6,6 +6,11 @@
  */
 
 import { TransportFailureKind } from "../types/enums.js";
+import {
+  formatAccountLimitHint,
+  formatContextOverflowHint,
+  isContextOverflowMessage,
+} from "./protocol.js";
 
 export { TransportFailureKind };
 
@@ -158,7 +163,12 @@ export function formatTransportFailure(failure: TransportFailure): string {
   if (failure.kind === TransportFailureKind.ProtocolDrift) {
     hints.push("Pin PI_CURSOR_CLIENT_VERSION or regenerate proto if wire drift persists.");
   }
-  return hints.length ? `${failure.message} ${hints.join(" ")}` : failure.message;
+  const message = hints.length ? `${failure.message} ${hints.join(" ")}` : failure.message;
+  if (failure.kind !== TransportFailureKind.RateLimit) return message;
+  // RATE_RE matches any `resource_exhausted`, including one that names an overflow.
+  return isContextOverflowMessage(message)
+    ? formatContextOverflowHint(message)
+    : formatAccountLimitHint(message);
 }
 
 /** Synthetic user text used when resuming a run after transport loss with a checkpoint. */

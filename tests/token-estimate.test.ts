@@ -1,0 +1,169 @@
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import {
+  ConversationTokenBreakdownSchema,
+  ConversationTokenCategorySchema,
+  ConversationTokenDetailsSchema,
+} from "../src/proto/agent_pb.js";
+import { cursorModelCost, estimateModelCost } from "../src/models/cost.js";
+import { modelConfig } from "../src/models/processing.js";
+import {
+  AgentServerMessageSchema,
+  ConversationStateStructureSchema,
+} from "../src/proto/agent_pb.js";
+import { processServerMessage } from "../src/stream/server-messages.js";
+import { conversationStates } from "../src/stream/session-state.js";
+import {
+  countedChars,
+  DEFAULT_CHARS_PER_TOKEN,
+  estimateContextTokens,
+  resolveCharsPerToken,
+} from "../src/stream/token-estimate.js";
+
+// Captured 2026-10-30 from a claude-sonnet-5-5 checkpoint (a 104 KB attached file):
+// tokenDetails field 3, length-prefixed as it was on the wire. usedTokens 67260; every
+// category is chars / ~2.44.
+const FIELD3_B64 =
+  "mQIIvI0EEOCnEhokCg1zeXN0ZW1fcHJvbXB0Eg1TeXN0ZW0gcHJvbXB0GIsRIN4pGiAKBXRvb2xzEhBUb29sIGRlZmluaXRpb25zGIs1INuBARoUCgVydWxlcxIFUnVsZXMYrAQgzwoaEgoGc2tpbGxzEgZTa2lsbHMgABocCgNtY3ASE01DUCAmIGR5bmFtaWMgdG9vbHMgABojCglzdWJhZ2VudHMSFFN1YmFnZW50IGRlZmluaXRpb25zIAAaNAoXc3VtbWFyaXplZF9jb252ZXJzYXRpb24SF1N1bW1hcml6ZWQgY29udmVyc2F0aW9uIAAaJAoMY29udmVyc2F0aW9uEgxDb252ZXJzYXRpb24Y+sIDIJrOCA==";
+
+function capturedDetails() {
+  const head = toBinary(
+    ConversationTokenDetailsSchema,
+    create(ConversationTokenDetailsSchema, { usedTokens: 67260, maxTokens: 300000 }),
+  );
+  const wire = Buffer.concat([head, Buffer.from([0x1a]), Buffer.from(FIELD3_B64, "base64")]);
+  return fromBinary(ConversationTokenDetailsSchema, wire);
+}
+
+describe("Cursor context token estimate", () => {
+  it("decodes the per-category breakdown Cursor sends in tokenDetails", () => {
+    const details = capturedDetails();
+    expect(details.usedTokens).toBe(67260);
+    expect(details.maxTokens).toBe(300000);
+    expect(details.breakdown?.categories.map((c) => c.key)).toContain("conversation");
+    expect(details.$unknown ?? []).toHaveLength(0);
+    expect(countedChars(details)).toBe(5342 + 16603 + 1359 + 141082);
+  });
+
+  it("estimates from counted characters instead of Cursor's chars/2.44 figure", () => {
+    const details = capturedDetails();
+    const estimate = estimateContextTokens(details, DEFAULT_CHARS_PER_TOKEN);
+    expect(estimate).toBe(Math.ceil(164386 / 3.5));
+    expect(estimate / details.usedTokens).toBeCloseTo(0.7, 1);
+  });
+
+  it("keeps Cursor's number when it sends no breakdown", () => {
+    const details = create(ConversationTokenDetailsSchema, { usedTokens: 1234, maxTokens: 300000 });
+    expect(estimateContextTokens(details)).toBe(1234);
+  });
+
+  it("is what a checkpoint puts on the stream state and the stored conversation", () => {
+    const convKey = "conv-token-wiring";
+    conversationStates.set(convKey, {
+      conversationId: "c",
+      checkpoint: null,
+      blobStore: new Map(),
+      lastAccessMs: 0,
+    } as never);
+    const state = {
+      toolCallIndex: 0,
+      pendingExecs: [],
+      outputTokens: 0,
+      totalTokens: 0,
+      turnEnded: false,
+    };
+    try {
+      const msg = create(AgentServerMessageSchema, {
+        message: {
+          case: "conversationCheckpointUpdate",
+          value: create(ConversationStateStructureSchema, { tokenDetails: capturedDetails() }),
+        },
+      });
+      processServerMessage(
+        msg,
+        new Map(),
+        [],
+        () => {},
+        state as never,
+        () => {},
+        () => {},
+        () => {},
+        undefined,
+        undefined,
+        convKey,
+      );
+
+      const expected = Math.ceil(164386 / DEFAULT_CHARS_PER_TOKEN);
+      expect(state).toMatchObject({ contextTokens: expected, totalTokens: expected });
+      expect(conversationStates.get(convKey)?.lastContextTokens).toBe(expected);
+    } finally {
+      conversationStates.delete(convKey);
+    }
+  });
+
+  it("round-trips the breakdown through the schema", () => {
+    const details = create(ConversationTokenDetailsSchema, {
+      usedTokens: 41,
+      breakdown: create(ConversationTokenBreakdownSchema, {
+        categories: [
+          create(ConversationTokenCategorySchema, { key: "conversation", tokens: 41, chars: 100 }),
+        ],
+      }),
+    });
+    const back = fromBinary(
+      ConversationTokenDetailsSchema,
+      toBinary(ConversationTokenDetailsSchema, details),
+    );
+    expect(estimateContextTokens(back, 4)).toBe(25);
+  });
+
+  it("accepts a positive PI_CURSOR_CHARS_PER_TOKEN override only", () => {
+    expect(resolveCharsPerToken(undefined)).toBe(DEFAULT_CHARS_PER_TOKEN);
+    expect(resolveCharsPerToken("3")).toBe(3);
+    expect(resolveCharsPerToken("0")).toBe(DEFAULT_CHARS_PER_TOKEN);
+    expect(resolveCharsPerToken("abc")).toBe(DEFAULT_CHARS_PER_TOKEN);
+  });
+});
+
+describe("Cursor model cost", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("is zero by default because Cursor bills plan quota", () => {
+    expect(cursorModelCost("claude-opus-5-5", false)).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+  });
+
+  it("uses API-rate estimates only when opted in", () => {
+    expect(cursorModelCost("claude-opus-5-5", true)).toEqual(estimateModelCost("claude-opus-5-5"));
+  });
+
+  it("reads PI_CURSOR_API_COST_ESTIMATE, defaulting to zero cost when it is unset", () => {
+    vi.stubEnv("PI_CURSOR_API_COST_ESTIMATE", "");
+    vi.stubEnv("CURSOR_API_COST_ESTIMATE", "");
+    vi.stubEnv("PI_CURSOR_PROVIDER_API_COST_ESTIMATE", "");
+    expect(cursorModelCost("claude-opus-5-5").input).toBe(0);
+    vi.stubEnv("PI_CURSOR_API_COST_ESTIMATE", "1");
+    expect(cursorModelCost("claude-opus-5-5")).toEqual(estimateModelCost("claude-opus-5-5"));
+    vi.stubEnv("PI_CURSOR_API_COST_ESTIMATE", "off");
+    expect(cursorModelCost("claude-opus-5-5").input).toBe(0);
+  });
+
+  it("is what Pi's model rows carry", () => {
+    const row = {
+      id: "claude-opus-5-5",
+      name: "Claude Opus 5.5",
+      supportsEffort: false,
+      contextWindow: 300_000,
+      maxTokens: 128_000,
+    } as never as Parameters<typeof modelConfig>[0];
+    vi.stubEnv("PI_CURSOR_API_COST_ESTIMATE", "");
+    expect(modelConfig(row).cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    vi.stubEnv("PI_CURSOR_API_COST_ESTIMATE", "1");
+    expect(modelConfig(row).cost).toEqual(estimateModelCost("claude-opus-5-5"));
+  });
+});

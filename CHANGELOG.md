@@ -2,10 +2,28 @@
 
 ## [Unreleased — fork]
 
+- **Pi tools are reachable under codemode-only.** Cursor no longer lists MCP tools as direct functions; models reach them through `GetDynamicTools` / `CallDynamicTool` in the `pi` namespace. The local-tool policy now gives that recipe, including for `codemode` and one `Promise.all` script for independent work, so models stop refusing with "codemode is not available".
+- **A dropped connection no longer looks like a finished reply.** A stream that ends without `turnEnded` (and without a Pi tool call) is transport loss: the turn restarts from the checkpoint only if nothing was shown yet; otherwise it fails with a retriable "connection lost" error, so Pi's auto-retry replaces the cut-off message instead of continuing it in place and risking repeated text. The log records the last server message before the cut-off.
+- **Esc during a Pi tool call no longer leaves a Cursor stream open.** Pi cancels the tool and never sends the follow-up request, so the bridge parked for tool results stayed open until the next prompt or the one-hour TTL. It is now released when the aborted run settles (Pi releases that report `agent_settled.aborted`).
+- **Cost is `0` by default.** Cursor bills plan quota, not tokens. `PI_CURSOR_API_COST_ESTIMATE=1` restores API-rate estimates.
+- **Context tokens are estimated from the characters Cursor counted.** Cursor's `usedTokens` is chars / ~2.44 (its `tokenDetails` breakdown, now in `agent.proto`), which over-reported context and made Pi compact early. The provider now divides counted characters by `PI_CURSOR_CHARS_PER_TOKEN` (default `3.5`, for every model).
+- **A Cursor quota or rate limit is no longer reported as context overflow.** `resource_exhausted` alone (Cursor usually sends just "Error") now gets a limit hint ("HTTP 429") that Pi retries; quota, usage-limit, subscription or billing wording gets a "quota exceeded" hint that Pi does not retry, unless it also names a throttle ("rate limit", "too many requests"), which stays retriable. Size wording ("context length", "token limit", "too many tokens", "prompt too long", …) gets the `/compact` hint on both the stream and transport paths, and the limit hint avoids "rate limit" so it never hides overflow wording Pi would compact on. Tests check these outcomes with pi-ai's own `isContextOverflow` and `isRetryableAssistantError`.
+- **Checkpoint field 46 is modelled.** Every live checkpoint carries it (VARINT, value 1), so `conversationCheckpointUpdate.payload#46` was logged as wire drift on every turn. It is now `unknown_field_46` in `agent.proto`.
+- **Documented how far the token estimate can be off** (README Troubleshooting): dense code runs nearer 3 characters per token than 3.5; `PI_CURSOR_CHARS_PER_TOKEN=3` compacts earlier for code-heavy work.
+- **Output tokens are never reported as zero for a reply that streamed text.** Cursor's `tokenDelta` is missing for short replies, so they reported `output: 0`. Output is now the larger of Cursor's sum and the streamed text, thinking and tool-call characters at the same chars-per-token rule.
+
 - Keep context overflow separate from wire-drift and retain up to 4096 conversation blobs.
 - Recover additive checkpoint fields while retaining Pi client identity on fields 21/22.
 
 ## [Unreleased]
+
+## [1.4.39] - 2026-10-08
+
+### Fixed
+
+- **A terminal Cursor error after a Pi tool call no longer drops the latest checkpoint.** When a checkpoint arrived after `toolUse` and Cursor then ended the stream with a non-retriable Connect error, the stream was marked finalized before the bridge was killed, so the close handler skipped the mid-pause save and left the dead bridge registered. The save and bridge release now run first, so the tool result resumes from the latest state.
+- **Pi tools whose names clash under the `mcp_pi_` prefix no longer reach the wrong tool.** With `bash` and a custom `mcp_pi_bash` registered, discovery advertised both as `mcp_pi_bash` and dispatch sent calls to the custom tool. One registry → wire → advertised name map (`cursorMcpToolNames()`) now feeds discovery, the RunRequest and RequestContext catalogs, replayed history, the local-tool policy, rejection guidance and dispatch: wire names never carry the prefix (`mcp_pi_bash` goes out as `bash_2`), and the model-facing name is always `mcp_pi_<wire>` (`mcp_pi_bash_2`). Registries without such a clash are advertised as before.
+- **Exec field 28 is no longer an unknown exec.** It is Cursor's Task/subagent request (`subagent_args`), not an unnamed blob. It is answered with a typed `SubagentError` instead of `exec_unknown_shape` / `ExecClientThrow`. This provider does not spawn the subagent, and it does not read or log the prompt or the API credentials that request can carry. Fixes [#42](https://github.com/Rahularya01/pi-cursor/issues/42).
 
 ## [1.4.38] - 2026-09-23
 

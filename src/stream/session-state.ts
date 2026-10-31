@@ -21,6 +21,7 @@ import {
   cleanupBridge,
   destroyAllIdleBridges,
   destroyIdleBridge,
+  removeActiveBridge,
 } from "./bridge-session.js";
 import { debugLog } from "./debug-log.js";
 import { textContent } from "./message-parsing.js";
@@ -537,6 +538,26 @@ export function cleanupSessionState(sessionId?: string): void {
   // Drop the in-memory copy so a long-lived process cannot pin a large blob store
   // after the user switched away. The journal stays so /resume can hydrate.
   conversationStates.delete(convKey);
+}
+
+/**
+ * Release the bridge parked for this session's Pi tool results after the run was aborted.
+ *
+ * When Esc lands during tool execution, Pi cancels the tool and never makes the follow-up
+ * provider request, so the bridge stayed open waiting for results until the next prompt or
+ * the one-hour TTL. End it the same way a new user turn would. The idle (reusable) bridge
+ * and the stored conversation are kept, so the next prompt continues normally.
+ */
+export function releaseAbortedToolBridge(sessionId?: string): boolean {
+  if (!sessionId) return false;
+  const bridgeKey = deriveBridgeKeyFromSessionId(sessionId);
+  const active = activeBridges.get(bridgeKey);
+  if (!active) return false;
+  debugLog("session.release_aborted_tool_bridge", { sessionId, bridgeKey });
+  clearInterval(active.heartbeatTimer);
+  if (active.bridge.alive) active.bridge.end();
+  removeActiveBridge(bridgeKey);
+  return true;
 }
 
 export function deterministicConversationId(convKey: string): string {
