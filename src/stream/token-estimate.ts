@@ -9,10 +9,12 @@
  * meter for half-full contexts.
  *
  * When the breakdown is present, estimate from the characters Cursor counted
- * instead, at Claude's usual ~3.5 characters per token. It is still an
- * estimate: dense code runs closer to 3, plain prose closer to 4. Without the
- * breakdown, keep Cursor's own number, which errs high (compacts early, never
- * late).
+ * instead, at ~3.5 characters per token for every model. That ratio is typical
+ * of the BPE tokenizers behind Cursor's Claude, GPT and Gemini models, and it is
+ * still an estimate: plain prose runs closer to 4 (the estimate reads high) and
+ * dense code or JSON closer to 3 (it reads up to ~15% low, so Pi compacts a
+ * little late). Without the breakdown, keep Cursor's own chars / 2.44 number,
+ * which always reads higher than the estimate.
  *
  * Per-category ratios were considered and rejected: the categories split by
  * source (system prompt, tools, conversation), not by content, and code and
