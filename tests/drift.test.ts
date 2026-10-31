@@ -116,11 +116,12 @@ describe("drift reporting in stream errors", () => {
     expect(message).toBe(raw);
     expect(message).not.toContain("wire-drift");
   });
-  it("maps resource_exhausted to context overflow, not protocol drift", () => {
+  it("maps a bare resource_exhausted to a limit hint, not context overflow or protocol drift", () => {
     recordDriftSignal("unknown_fields", "conversationCheckpointUpdate.payload#34,37");
     const message = enhanceCursorStreamError("Connect error resource_exhausted: Error");
 
-    expect(message).toContain("context-hint");
+    expect(message).toContain("limit-hint");
+    expect(message).not.toContain("context-hint");
     expect(message).not.toContain("protocol-hint");
     expect(message).not.toContain("[wire-drift");
   });

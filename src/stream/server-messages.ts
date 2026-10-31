@@ -14,6 +14,8 @@
 import { create, toBinary, type MessageInitShape } from "@bufbuild/protobuf";
 import { pathToFileURL } from "node:url";
 
+import { countedChars, estimateContextTokens } from "./token-estimate.js";
+
 import {
   AgentClientMessageSchema,
   ComputerUseErrorSchema,
@@ -24,6 +26,10 @@ import {
   ExecClientThrowSchema,
   GetBlobResultSchema,
   KvClientMessageSchema,
+  McpStateExecResultSchema,
+  McpStateServerSchema,
+  McpStateSuccessSchema,
+  McpToolDefinitionSchema,
   McpResultSchema,
   McpToolNotFoundSchema,
   ReadMcpResourceExecResultSchema,
@@ -41,8 +47,8 @@ import {
   SetupVmEnvironmentSuccessSchema,
   StartGrindExecutionResultSchema,
   StartGrindExecutionSuccessSchema,
-  StartGrindPlanningResultSchema,
-  StartGrindPlanningSuccessSchema,
+  SubagentErrorSchema,
+  SubagentResultSchema,
   TruncatedToolCallResultSchema,
   TruncatedToolCallSuccessSchema,
   type AgentServerMessage,
@@ -63,8 +69,9 @@ import {
   isLocalToolExec,
   localToolCandidates,
   nativeToolRejectReason,
+  wireMcpToolDefinitions,
 } from "./local-tool-policy.js";
-import { stripCursorMcpToolName } from "./root-prompt.js";
+import { cursorMcpToolNames } from "./root-prompt.js";
 import {
   interactionUpdateProgress,
   MAX_ACTIVE_BLOB_BYTES,
@@ -251,8 +258,15 @@ export function processServerMessage(
   }
   if (msgCase === "conversationCheckpointUpdate") {
     const stateStructure = msg.message.value as ConversationStateStructure;
-    if ((stateStructure as any).tokenDetails) {
-      const used = (stateStructure as any).tokenDetails.usedTokens;
+    const details = stateStructure.tokenDetails;
+    if (details) {
+      const used = estimateContextTokens(details);
+      debugLog("native.context_tokens", {
+        cursorUsedTokens: details.usedTokens,
+        cursorMaxTokens: details.maxTokens,
+        countedChars: countedChars(details),
+        estimatedTokens: used,
+      });
       state.totalTokens = used;
       state.contextTokens = used;
       // Recorded for the *next* turn on this conversation, so its cache
@@ -364,6 +378,56 @@ function handleKvMessage(
   return false;
 }
 
+function mcpToolsByServer(mcpTools: McpToolDefinition[]): Map<string, McpToolDefinition[]> {
+  const byServer = new Map<string, McpToolDefinition[]>();
+  for (const tool of mcpTools) {
+    const server = tool.providerIdentifier || "pi";
+    const tools = byServer.get(server) ?? [];
+    tools.push(tool);
+    byServer.set(server, tools);
+  }
+  return byServer;
+}
+
+/**
+ * Cursor's current agent finds MCP tools through its meta tools
+ * (GetDynamicTools / CallDynamicTool). They ask the client which servers and
+ * tools it has with an `mcpStateExecArgs` exec, which reuses field 36 of the
+ * retired `startGrindPlanningArgs`. Answering it as grind planning gave Cursor
+ * an empty server list, so discovery reported `namespace "pi" not found` and
+ * models that check their catalog first concluded the Pi tools weren't
+ * registered (#40).
+ */
+export function mcpStateServersFor(mcpTools: McpToolDefinition[], serverIdentifiers: string[]) {
+  const servers = [...mcpToolsByServer(mcpTools)];
+  const toolNames = cursorMcpToolNames(availableToolNamesFor(mcpTools));
+  const matching = servers.filter(([server]) => serverIdentifiers.includes(server));
+  // Cursor's client falls back to the whole catalog when no ID matches,
+  // including its generic "custom-user-tools" ID for user-defined tools.
+  return (matching.length ? matching : servers).map(([server, tools]) =>
+    create(McpStateServerSchema, {
+      serverName: server,
+      serverIdentifier: server,
+      // `name` carries the wire name, as in RunRequest/RequestContext, and
+      // `toolName` the advertised one. Observed live (composer-2.5, claude-4.5-
+      // sonnet, gpt-5.2, gemini-3-flash): the call comes back through
+      // CallDynamicTool with McpArgs.tool_name equal to this `toolName`
+      // verbatim (no extra prefix) and McpArgs.name = `<server>-<toolName>`.
+      // The raw Pi registry used by mcpArgs is not mutated.
+      tools:
+        server === "pi"
+          ? tools.map((tool) =>
+              create(McpToolDefinitionSchema, {
+                ...tool,
+                name: toolNames.wire(tool.toolName || tool.name),
+                toolName: toolNames.advertised(tool.toolName || tool.name),
+              }),
+            )
+          : tools,
+    }),
+  );
+}
+
 /**
  * Returns true when this `execServerMessage` was handled (MCP exec **or** a
  * native-tool result). Handled round-trips count as idle-watchdog progress.
@@ -401,7 +465,7 @@ function handleExecMessageInner(
       rules: [],
       env,
       repositoryInfo: [],
-      tools: mcpTools,
+      tools: wireMcpToolDefinitions(mcpTools),
       gitRepos: [],
       projectLayouts: [],
       mcpInstructions: [],
@@ -423,16 +487,15 @@ function handleExecMessageInner(
         : typeof mcpArgs.name === "string"
           ? mcpArgs.name
           : "";
-    // The model sometimes mimics the `mcp_pi_<tool>` naming it saw in its own
-    // replayed history (root-prompt.ts) when issuing a new call. Pi's tool
-    // registry only knows the unprefixed name, so unwrap it before matching.
-    const toolName = stripCursorMcpToolName(rawToolName);
+    // Map the advertised (`mcp_pi_<wire>`) or wire name back to Pi's registry
+    // name. The two never overlap; see cursorMcpToolNames.
     const availableTools = availableToolNamesFor(mcpTools);
-    if (!toolName || !availableTools.includes(toolName)) {
+    const toolName = cursorMcpToolNames(availableTools).resolve(rawToolName);
+    if (!toolName) {
       const notFound = create(McpResultSchema, {
         result: {
           case: "toolNotFound",
-          value: create(McpToolNotFoundSchema, { name: toolName, availableTools }),
+          value: create(McpToolNotFoundSchema, { name: rawToolName, availableTools }),
         },
       });
       sendExecResult(execMsg, "mcpResult", notFound, sendFrame);
@@ -628,14 +691,38 @@ function handleExecMessageInner(
     );
     return true;
   }
-  if (execCase === "startGrindPlanningArgs") {
+  if (execCase === "mcpStateExecArgs") {
+    const args = (execMsg as any).message.value;
     sendExecResult(
       execMsg,
-      "startGrindPlanningResult",
-      create(StartGrindPlanningResultSchema, {
+      "mcpStateExecResult",
+      create(McpStateExecResultSchema, {
         result: {
           case: "success",
-          value: create(StartGrindPlanningSuccessSchema, {}),
+          value: create(McpStateSuccessSchema, {
+            servers: mcpStateServersFor(mcpTools, args.serverIdentifiers ?? []),
+          }),
+        },
+      }),
+      sendFrame,
+    );
+    return true;
+  }
+  if (execCase === "subagentArgs") {
+    // Cursor's Task tool. Do not read the prompt or the credential oneof, and do not
+    // claim success: that would look like a subagent ran. A typed error releases the
+    // exec without landing in the unknown-shape path.
+    sendExecResult(
+      execMsg,
+      "subagentResult",
+      create(SubagentResultSchema, {
+        result: {
+          case: "error",
+          value: create(SubagentErrorSchema, {
+            error:
+              "Pi's Cursor provider does not spawn Cursor subagents. No subagent was started. " +
+              "Do the work in this conversation with the registered Pi MCP tools instead of calling Task again.",
+          }),
         },
       }),
       sendFrame,

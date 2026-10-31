@@ -4,7 +4,7 @@
 
 import type { CursorModel } from "../stream/model-discovery.js";
 import type { CursorNativeModelRouting } from "../stream/model-routing.js";
-import { estimateModelCost } from "./cost.js";
+import { cursorModelCost } from "./cost.js";
 import { clampCursorContextWindow } from "./limits.js";
 import { ProviderConstant, type PiThinkingLevel } from "../types/enums.js";
 
@@ -338,7 +338,7 @@ export function modelConfig(m: ProcessedModel) {
         thinkingLevelMap: m.effortMap,
       }),
     input,
-    cost: estimateModelCost(m.id),
+    cost: cursorModelCost(m.id),
     contextWindow: m.contextWindow,
     maxTokens: m.maxTokens,
   };

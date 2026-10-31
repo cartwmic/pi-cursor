@@ -153,26 +153,39 @@ describe("Pi-only local tool routing", () => {
   it("names codemode coverage when codemode is exposed without a direct read/bash tool", () => {
     const reason = nativeToolRejectReason("shellStreamArgs", tools("codemode", "subagent"));
     expect(reason).toContain("mcp_pi_codemode");
-    expect(reason).toContain("codemode tool covers local operations");
+    expect(reason).toContain("covers local operations through its nested tools API");
     expect(reason).toContain("tools.bash");
     const policy = localToolPolicyText(tools("codemode", "subagent"));
-    expect(policy).toContain("codemode tool covers local operations");
+    expect(policy).toContain("covers local operations through its nested tools API");
     expect(policy).toContain("tools.read");
     expect(nativeToolRejectReason("shellArgs", tools("bash"))).not.toContain(
-      "codemode tool covers local operations",
+      "covers local operations through its nested tools API",
     );
-    expect(localToolPolicyText(tools("bash"))).not.toContain("codemode tool covers");
+    expect(localToolPolicyText(tools("bash"))).not.toContain("covers local operations through");
   });
 
-  it("tells the model to call directly and gives the raw-name fallback under the pi namespace", () => {
+  it("tells the model to reach Pi tools through CallDynamicTool in the pi namespace", () => {
     const reason = nativeToolRejectReason("readArgs", tools("read", "bash"));
-    expect(reason).toContain("do not search any tool catalog");
-    expect(reason).toContain("not proof that they are unregistered");
-    expect(reason).toContain("reachable under the pi namespace");
-    expect(reason).toContain("read instead of mcp_pi_read");
+    expect(reason).toContain("not in your direct function list");
+    expect(reason).toContain('call one with CallDynamicTool, setting namespace to "pi"');
+    expect(reason).toContain('(for example "mcp_pi_read")');
+    expect(reason).toContain("not proof that it is unregistered");
     const policy = localToolPolicyText(tools("bash"));
-    expect(policy).toContain("do not search any tool catalog");
-    expect(policy).toContain("bash instead of mcp_pi_bash");
+    expect(policy).toContain("CallDynamicTool");
+    expect(policy).toContain('GetDynamicTools with namespace "pi"');
+  });
+
+  it("gives the codemode-only setup the exact CallDynamicTool recipe", () => {
+    // codemode `only`: codemode is the sole Pi tool and is not a known local tool name,
+    // so the reach text must not depend on the "Local Pi MCP tools" list being nonempty.
+    const policy = localToolPolicyText(tools("codemode"));
+    expect(policy).toContain("CallDynamicTool");
+    expect(policy).toContain('(for example "mcp_pi_codemode")');
+    expect(policy).toContain('namespace "pi", toolName "mcp_pi_codemode"');
+    expect(policy).toContain('arguments {"code": "<JavaScript>"}');
+    expect(policy).toContain("Promise.all");
+    const reason = nativeToolRejectReason("shellStreamArgs", tools("codemode"));
+    expect(reason).toContain('toolName "mcp_pi_codemode"');
   });
 
   it("keeps the prompt compact without hiding custom tools behind a no-tools claim", () => {

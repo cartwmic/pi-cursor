@@ -6,12 +6,15 @@ import { join } from "node:path";
 
 import {
   AgentServerMessageSchema,
+  ConversationStateStructureSchema,
   ExecServerMessageSchema,
   HeartbeatUpdateSchema,
   InteractionUpdateSchema,
   TextDeltaUpdateSchema,
   TurnEndedUpdateSchema,
+  type AgentServerMessage,
   type InteractionUpdate,
+  type McpToolDefinition,
 } from "../src/proto/agent_pb.js";
 import { frameConnectMessage, MAX_CONNECT_MESSAGE_BYTES } from "../src/client/bridge.js";
 import { ConnectFlag } from "../src/types/enums.js";
@@ -40,14 +43,19 @@ import type { StoredConversation } from "../src/stream/types.js";
 import {
   cleanupSessionState,
   conversationStates,
+  deriveBridgeKeyFromSessionId,
+  releaseAbortedToolBridge,
   deriveConversationKeyFromSessionId,
 } from "../src/stream/session-state.js";
 import {
+  activeBridges,
   parkIdleBridge,
+  removeActiveBridge,
   setBridgeFactoryForTests,
   startBridge,
   destroyAllIdleBridges,
 } from "../src/stream/bridge-session.js";
+import { buildMcpToolDefinitions } from "../src/stream/tool-schema.js";
 
 describe("transport loss recovery policy", () => {
   it("allows blind restart only when nothing was streamed", () => {
@@ -217,6 +225,30 @@ describe("durable run journal", () => {
     expect(conversationStates.has(convKey)).toBe(false);
     const loaded = readConversationJournal(convKey);
     expect(loaded?.conversationId).toBe("conv-journal-1");
+  });
+});
+
+describe("aborted tool execution", () => {
+  it("releases the bridge parked for tool results once the aborted run settles", () => {
+    const sessionId = "session-aborted-tool";
+    const bridgeKey = deriveBridgeKeyFromSessionId(sessionId);
+    let ended = 0;
+    const heartbeatTimer = setInterval(() => {}, 60_000);
+    activeBridges.set(bridgeKey, {
+      bridge: { alive: true, end: () => ended++ } as never,
+      heartbeatTimer,
+    } as never);
+    const conv = deriveConversationKeyFromSessionId(sessionId);
+    conversationStates.set(conv, { conversationId: "c" } as never);
+
+    expect(releaseAbortedToolBridge(sessionId)).toBe(true);
+    expect(ended).toBe(1);
+    expect(activeBridges.has(bridgeKey)).toBe(false);
+    // The conversation is kept so the next prompt continues it.
+    expect(conversationStates.has(conv)).toBe(true);
+    expect(releaseAbortedToolBridge(sessionId)).toBe(false);
+    conversationStates.delete(conv);
+    clearInterval(heartbeatTimer);
   });
 });
 
@@ -433,6 +465,108 @@ describe("completed-turn connection close", () => {
     expect(calls).toEqual(["done:stop"]);
   });
 
+  function streamDoneHarness() {
+    const calls: string[] = [];
+    const writer = {
+      output: {} as never,
+      closed: false,
+      start() {},
+      text() {},
+      thinking() {},
+      toolCall() {},
+      done(reason: string) {
+        calls.push(`done:${reason}`);
+        this.closed = true;
+      },
+      error(message: string) {
+        calls.push(`error:${message}`);
+        this.closed = true;
+      },
+    };
+    let onData: (chunk: Buffer) => void = () => {};
+    let onClose: (code: number) => void = () => {};
+    let onStreamDone: () => void = () => {};
+    let kills = 0;
+    const bridge = {
+      // h2-session's kill destroys the session and reports exit 1 through onClose.
+      proc: {
+        kill: () => {
+          kills++;
+          onClose(1);
+          return true;
+        },
+      },
+      alive: true,
+      lastStderr: () => "",
+      write: () => {},
+      end: () => {},
+      onData: (cb: (chunk: Buffer) => void) => {
+        onData = cb;
+      },
+      onClose: (cb: (code: number) => void) => {
+        onClose = cb;
+      },
+      onStreamDone: (cb: () => void) => {
+        onStreamDone = cb;
+      },
+    };
+    const heartbeatTimer = setInterval(() => {}, 60_000);
+    __testInternals.writeNativeStream(
+      bridge,
+      heartbeatTimer,
+      new Map(),
+      [],
+      {} as never,
+      "claude-sonnet-5-5",
+      "bridge-key-done",
+      "conv-key-done",
+      [],
+      { userText: "hi", steps: [] },
+      writer as never,
+      undefined,
+      "req-1",
+      undefined,
+      0,
+    );
+    return {
+      calls,
+      kills: () => kills,
+      data: (chunk: Buffer) => onData(chunk),
+      streamDone: () => onStreamDone(),
+      dispose: () => clearInterval(heartbeatTimer),
+    };
+  }
+
+  it("reports a stream that ends without turnEnded as transport loss, not a finished reply", () => {
+    const h = streamDoneHarness();
+    h.data(
+      updateFrame({
+        case: "textDelta",
+        value: create(TextDeltaUpdateSchema, { text: "The bicy" }),
+      }),
+    );
+    // A dropped socket can reach the bridge as a clean HTTP/2 end with no turnEnded.
+    h.streamDone();
+    h.dispose();
+    expect(h.kills()).toBe(1);
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]).toMatch(
+      /^error:Cursor connection lost: the stream ended before the turn finished/,
+    );
+  });
+
+  it("still finishes a stream that ends after turnEnded as a completed turn", () => {
+    const h = streamDoneHarness();
+    h.data(
+      updateFrame({ case: "textDelta", value: create(TextDeltaUpdateSchema, { text: "done" }) }),
+    );
+    h.data(updateFrame({ case: "turnEnded", value: create(TurnEndedUpdateSchema, {}) }));
+    h.streamDone();
+    h.dispose();
+    expect(h.kills()).toBe(0);
+    expect(h.calls).toEqual(["done:stop"]);
+  });
+
   it("fails a turn parked on an unanswerable exec even while heartbeats keep arriving", async () => {
     const calls: string[] = [];
     const written: Uint8Array[] = [];
@@ -561,12 +695,18 @@ describe("retriable Cursor end-stream errors", () => {
     return frame;
   }
 
-  function setup() {
+  function setup({
+    mcpTools = [],
+    bridgeKey = "bridge-endstream",
+    convKey = "conv-endstream",
+  }: { mcpTools?: McpToolDefinition[]; bridgeKey?: string; convKey?: string } = {}) {
     const calls: string[] = [];
     const restarts: number[] = [];
+    const restartCheckpoints: (Uint8Array | null)[] = [];
     let killCalls = 0;
     let onData: (chunk: Buffer) => void = () => {};
     let onClose: (code: number) => void = () => {};
+    let onStreamDone: () => void = () => {};
     const bridge = {
       proc: {
         kill: () => {
@@ -585,6 +725,9 @@ describe("retriable Cursor end-stream errors", () => {
       },
       onClose: (cb: (code: number) => void) => {
         onClose = cb;
+      },
+      onStreamDone: (cb: () => void) => {
+        onStreamDone = cb;
       },
     };
     const writer = {
@@ -607,8 +750,9 @@ describe("retriable Cursor end-stream errors", () => {
       currentAttempt: 1,
       maxRetries: 5,
       recoverBeforeRetry: true,
-      restart(nextAttempt: number) {
+      restart(nextAttempt: number, context: { latestCheckpoint: Uint8Array | null }) {
         restarts.push(nextAttempt);
+        restartCheckpoints.push(context.latestCheckpoint);
         return true;
       },
     };
@@ -617,11 +761,11 @@ describe("retriable Cursor end-stream errors", () => {
       bridge,
       heartbeatTimer,
       new Map(),
-      [],
+      mcpTools,
       {} as never,
       "claude-4.5-sonnet",
-      "bridge-endstream",
-      "conv-endstream",
+      bridgeKey,
+      convKey,
       [],
       { userText: "hi", steps: [] },
       writer as never,
@@ -633,13 +777,112 @@ describe("retriable Cursor end-stream errors", () => {
     return {
       calls,
       restarts,
+      restartCheckpoints,
       get killCalls() {
         return killCalls;
       },
       onData,
+      streamDone: () => onStreamDone(),
       heartbeatTimer,
     };
   }
+
+  const serverFrame = (message: AgentServerMessage["message"]) =>
+    Buffer.from(
+      frameConnectMessage(
+        toBinary(AgentServerMessageSchema, create(AgentServerMessageSchema, { message })),
+      ),
+    );
+
+  // A clean HTTP/2 end without `turnEnded` is a cut-off stream. With a checkpoint and nothing
+  // shown yet, the provider restarts from that checkpoint instead of finishing an empty reply.
+  it("restarts from the checkpoint when a stream ends without turnEnded before any text", () => {
+    const harness = setup({ bridgeKey: "bridge-done-ckpt", convKey: "conv-done-ckpt" });
+    try {
+      const checkpoint = create(ConversationStateStructureSchema, {});
+      harness.onData(serverFrame({ case: "conversationCheckpointUpdate", value: checkpoint }));
+      harness.streamDone();
+
+      expect(harness.killCalls).toBe(1);
+      expect(harness.restarts).toEqual([2]);
+      expect(harness.restartCheckpoints).toEqual([
+        toBinary(ConversationStateStructureSchema, checkpoint),
+      ]);
+      expect(harness.calls).toEqual([]);
+    } finally {
+      clearInterval(harness.heartbeatTimer);
+      conversationStates.delete("conv-done-ckpt");
+    }
+  });
+
+  // Continuing in place after text was shown could restate it inside the same message. The
+  // retriable "connection lost" error lets Pi's auto-retry replace the message instead.
+  it("fails a cut-off stream that already showed text instead of continuing in place", () => {
+    const harness = setup({ bridgeKey: "bridge-done-text", convKey: "conv-done-text" });
+    try {
+      harness.onData(
+        serverFrame({
+          case: "interactionUpdate",
+          value: create(InteractionUpdateSchema, {
+            message: {
+              case: "textDelta",
+              value: create(TextDeltaUpdateSchema, { text: "The bi" }),
+            },
+          }),
+        }),
+      );
+      harness.onData(
+        serverFrame({
+          case: "conversationCheckpointUpdate",
+          value: create(ConversationStateStructureSchema, {}),
+        }),
+      );
+      harness.streamDone();
+
+      expect(harness.killCalls).toBe(1);
+      expect(harness.restarts).toEqual([]);
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls[0]).toMatch(/^error:Cursor connection lost/);
+    } finally {
+      clearInterval(harness.heartbeatTimer);
+      conversationStates.delete("conv-done-text");
+    }
+  });
+
+  // A Pi tool call ends Cursor's stream without `turnEnded` by design: the turn is paused on
+  // the result, not cut off, so the bridge must stay up for it.
+  it("does not kill or restart a stream that ends paused on a Pi tool call", () => {
+    const bridgeKey = "bridge-done-pause";
+    const harness = setup({
+      mcpTools: buildMcpToolDefinitions([
+        { type: "function", function: { name: "bash", parameters: { type: "object" } } },
+      ]),
+      bridgeKey,
+      convKey: "conv-done-pause",
+    });
+    try {
+      harness.onData(
+        serverFrame({
+          case: "execServerMessage",
+          value: create(ExecServerMessageSchema, {
+            id: 7,
+            execId: "exec-7",
+            message: { case: "mcpArgs", value: { toolName: "bash", toolCallId: "call-1" } },
+          }),
+        }),
+      );
+      expect(harness.calls).toEqual(["done:toolUse"]);
+      harness.streamDone();
+
+      expect(harness.killCalls).toBe(0);
+      expect(harness.restarts).toEqual([]);
+      expect(harness.calls).toEqual(["done:toolUse"]);
+    } finally {
+      clearInterval(harness.heartbeatTimer);
+      removeActiveBridge(bridgeKey);
+      conversationStates.delete("conv-done-pause");
+    }
+  });
 
   // A transient upstream `internal` is the most common mid-session failure, and it arrives as an
   // end-stream frame rather than a bridge exit. Failing the turn on it strands work the retry
@@ -680,5 +923,62 @@ describe("retriable Cursor end-stream errors", () => {
 
     expect(harness.restarts).toEqual([]);
     expect(harness.calls[0]).toMatch(/^error:Connect error invalid_argument: model does not exist/);
+  });
+
+  // The terminal path marks the stream finalized before killing the bridge, which makes `onClose`
+  // return early. A Pi call already handed off with `toolUse` must still get the checkpoint that
+  // arrived after it, or the tool result cannot resume from the latest state.
+  it("saves the post-toolUse checkpoint and releases the bridge on a terminal error mid-pause", () => {
+    const bridgeKey = "bridge-endstream-pause";
+    const convKey = "conv-endstream-pause";
+    const stored: StoredConversation = {
+      conversationId: "conv-1",
+      checkpoint: null,
+      sessionScoped: true,
+      sessionId: "session-1",
+      blobStore: new Map(),
+      lastAccessMs: 0,
+    };
+    conversationStates.set(convKey, stored);
+    const harness = setup({
+      mcpTools: buildMcpToolDefinitions([
+        { type: "function", function: { name: "bash", parameters: { type: "object" } } },
+      ]),
+      bridgeKey,
+      convKey,
+    });
+    const frame = (message: AgentServerMessage["message"]) =>
+      Buffer.from(
+        frameConnectMessage(
+          toBinary(AgentServerMessageSchema, create(AgentServerMessageSchema, { message })),
+        ),
+      );
+    try {
+      harness.onData(
+        frame({
+          case: "execServerMessage",
+          value: create(ExecServerMessageSchema, {
+            id: 7,
+            execId: "exec-7",
+            message: { case: "mcpArgs", value: { toolName: "bash", toolCallId: "call-1" } },
+          }),
+        }),
+      );
+      expect(harness.calls).toEqual(["done:toolUse"]);
+      expect(activeBridges.has(bridgeKey)).toBe(true);
+
+      const checkpoint = create(ConversationStateStructureSchema, {});
+      harness.onData(frame({ case: "conversationCheckpointUpdate", value: checkpoint }));
+      harness.onData(endStreamErrorFrame("invalid_argument", "model does not exist"));
+
+      expect(stored.checkpoint).toEqual(toBinary(ConversationStateStructureSchema, checkpoint));
+      expect(stored.midPausePendingToolCalls).toEqual([{ toolCallId: "call-1", toolName: "bash" }]);
+      expect(activeBridges.has(bridgeKey)).toBe(false);
+      expect(harness.restarts).toEqual([]);
+    } finally {
+      clearInterval(harness.heartbeatTimer);
+      removeActiveBridge(bridgeKey);
+      conversationStates.delete(convKey);
+    }
   });
 });

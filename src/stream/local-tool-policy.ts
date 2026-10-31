@@ -1,6 +1,8 @@
 /** Local operations are executed by Pi, never by the provider. */
-import type { McpToolDefinition } from "../proto/agent_pb.js";
-import { cursorMcpToolName } from "./root-prompt.js";
+import { create } from "@bufbuild/protobuf";
+
+import { McpToolDefinitionSchema, type McpToolDefinition } from "../proto/agent_pb.js";
+import { cursorMcpToolName, cursorMcpToolNames } from "./root-prompt.js";
 
 export const MAX_LOCAL_TOOL_REJECTIONS = 8;
 export const LOCAL_TOOL_LOOP_ERROR =
@@ -34,6 +36,36 @@ export function availableToolNamesFor(tools: McpToolDefinition[]): string[] {
   return names;
 }
 
+/** Registered names advertised under something other than their usual prefixed form. */
+function renamedToolNames(available: readonly string[]): Array<[string, string]> {
+  const names = cursorMcpToolNames(available);
+  return available
+    .map((name): [string, string] => [name, names.advertised(name)])
+    .filter(([name, advertised]) => advertised !== cursorMcpToolName(name));
+}
+
+const wireCache = new WeakMap<McpToolDefinition[], McpToolDefinition[]>();
+/**
+ * The Pi catalog as sent in RunRequest and RequestContext, under the wire names of
+ * `cursorMcpToolNames`. The registry passed to dispatch keeps Pi's own names.
+ */
+export function wireMcpToolDefinitions(tools: McpToolDefinition[]): McpToolDefinition[] {
+  const cached = wireCache.get(tools);
+  if (cached) return cached;
+  const names = cursorMcpToolNames(availableToolNamesFor(tools));
+  let changed = false;
+  const wire = tools.map((tool) => {
+    const name = tool.toolName || tool.name;
+    const wireName = names.wire(name);
+    if (wireName === name || (tool.providerIdentifier || "pi") !== "pi") return tool;
+    changed = true;
+    return create(McpToolDefinitionSchema, { ...tool, name: wireName, toolName: wireName });
+  });
+  const result = changed ? wire : tools;
+  wireCache.set(tools, result);
+  return result;
+}
+
 /** Lists registered tools with known matches first, custom tools visible, and bash last. */
 export function localToolCandidates(execCase: string, tools: McpToolDefinition[]): string[] {
   const available = availableToolNamesFor(tools);
@@ -52,23 +84,24 @@ export function localToolCandidates(execCase: string, tools: McpToolDefinition[]
 }
 
 /**
- * How to reach the registered Pi MCP tools. Cursor exposes them under the `pi`
- * namespace by their raw names; the `mcp_pi_<tool>` form appears in replayed
- * history and is unwrapped on dispatch, but it is not always the callable name.
- * A tool-catalog search does not surface MCP tools, so the model must attempt
- * the call directly instead of treating a failed search as proof of absence.
+ * How to reach the registered Pi MCP tools. Cursor's agent no longer puts MCP tools in the
+ * model's direct function list: the model sees its native tools plus the meta tools
+ * GetDynamicTools and CallDynamicTool, and reaches MCP servers through them (the `pi`
+ * namespace is answered by `mcpStateServersFor`). Without this recipe, models that look for a
+ * direct `codemode` or `mcp_pi_read` function conclude the Pi tools are not registered and
+ * refuse (observed with Claude Opus, Sonnet and Haiku under codemode `only`).
  */
 function mcpToolReachText(available: readonly string[]): string {
-  const example = available.find((name) => name !== "codemode");
-  const exampleText = example
-    ? ` (for example ${example} instead of mcp_pi_${example})`
-    : "";
+  const names = cursorMcpToolNames(available);
+  const example = available.find((name) => name !== "codemode") ?? available[0];
+  const exampleText = example ? ` (for example "${names.advertised(example)}")` : "";
   return (
-    "Call a listed tool immediately by name; do not search any tool catalog or list available " +
-    "tools first. The tool catalog search does not surface MCP tools, so their absence from it " +
-    "is expected and is not proof that they are unregistered. " +
-    "If an mcp_pi_<tool> name is not callable, the same tool is reachable under the pi namespace " +
-    `by its raw name${exampleText}.`
+    "Pi tools are not in your direct function list. They live in the dynamic tool namespace " +
+    '"pi": call one with CallDynamicTool, setting namespace to "pi", toolName to its listed name' +
+    `${exampleText}, mcpDetails.description to a one-sentence summary, and arguments to the ` +
+    'tool\'s input. GetDynamicTools with namespace "pi" returns their schemas. A Pi tool missing ' +
+    "from your direct functions or from a name search is expected and is not proof that it is " +
+    "unregistered; call it through CallDynamicTool."
   );
 }
 
@@ -78,27 +111,29 @@ function mcpToolReachText(available: readonly string[]): string {
  * Without this note the model only sees a vague "other exposed Pi tools" line and
  * keeps retrying native Cursor tools instead of writing a codemode script.
  */
-function codemodeCoverageText(): string {
+function codemodeCoverageText(available: readonly string[]): string {
+  const name = cursorMcpToolNames(available).advertised("codemode");
   return (
-    "The codemode tool covers local operations through its nested tools API: call codemode " +
-    "with JavaScript such as `await tools.bash({ command: \"...\" })` for shell commands, " +
-    "`await tools.read({ path: \"...\" })` for file reads, and `await tools.write(...)` or " +
-    "`await tools.edit(...)` for file edits."
+    `The codemode tool (namespace "pi", toolName "${name}") covers local operations through ` +
+    'its nested tools API: call it through CallDynamicTool with arguments {"code": "<JavaScript>"} ' +
+    'using `await tools.bash({ command: "..." })` for shell commands, ' +
+    '`await tools.read({ path: "..." })` for file reads, and `await tools.write(...)` or ' +
+    "`await tools.edit(...)` for file edits. Run independent operations in one codemode script " +
+    "with Promise.all rather than in separate calls."
   );
 }
 
 /** Explains a native rejection using registered tools and their schemas, or the current lack of tools. */
 export function nativeToolRejectReason(execCase: string, tools: McpToolDefinition[]): string {
-  const candidates = localToolCandidates(execCase, tools);
-  const names = candidates.map(cursorMcpToolName);
+  const available = availableToolNamesFor(tools);
+  const toolNames = cursorMcpToolNames(available);
+  const names = localToolCandidates(execCase, tools).map(toolNames.advertised);
   const guidance = names.length
-    ? `Use the registered Pi MCP tools: ${names.join(", ")}. ${mcpToolReachText(availableToolNamesFor(tools))} ` +
+    ? `Use the registered Pi MCP tools: ${names.join(", ")}. ${mcpToolReachText(available)} ` +
       "Choose a tool that supports the operation and construct arguments according to its schema; " +
       "do not copy native Cursor arguments unchanged. If none supports it, report that limitation."
     : "No Pi MCP tools are exposed for this request, so this operation cannot be performed in this request.";
-  const codemodeNote = availableToolNamesFor(tools).includes("codemode")
-    ? ` ${codemodeCoverageText()}`
-    : "";
+  const codemodeNote = available.includes("codemode") ? ` ${codemodeCoverageText(available)}` : "";
   return `Do not retry this native Cursor tool. It is unavailable. No operation was performed. ${guidance}${codemodeNote}`;
 }
 
@@ -106,15 +141,20 @@ export function nativeToolRejectReason(execCase: string, tools: McpToolDefinitio
 export function localToolPolicyText(tools: McpToolDefinition[]): string {
   const available = availableToolNamesFor(tools);
   const known = new Set(Object.values(LOCAL_TOOL_HINTS).flat());
-  const names = available.filter((name) => known.has(name)).map(cursorMcpToolName);
-  const codemodeNote = available.includes("codemode") ? ` ${codemodeCoverageText()}` : "";
+  const names = available
+    .filter((name) => known.has(name))
+    .map(cursorMcpToolNames(available).advertised);
+  const clashes = renamedToolNames(available).map(
+    ([name, advertised]) => `call the custom tool "${name}" as ${advertised}`,
+  );
+  const codemodeNote = available.includes("codemode") ? ` ${codemodeCoverageText(available)}` : "";
   return (
     "Local file reads, searches, directory listings, writes, deletions and shell commands " +
     "must use Pi MCP tools. Native Cursor local tools are disabled; do not call or retry them. " +
     (available.length
-      ? (names.length
-        ? `Local Pi MCP tools: ${names.join(", ")}. ${mcpToolReachText(available)} `
-        : "") +
+      ? (names.length ? `Local Pi MCP tools: ${names.join(", ")}. ` : "") +
+        `${mcpToolReachText(available)} ` +
+        (clashes.length ? `To avoid a name clash, ${clashes.join("; ")}. ` : "") +
         "Other exposed Pi tools may also support the operation. Follow each tool's input schema. " +
         "If no registered tool supports an operation, report that limitation."
       : "No Pi MCP tools are exposed for this request. Local operations are unavailable in this request.") +

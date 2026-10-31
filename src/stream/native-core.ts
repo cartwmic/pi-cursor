@@ -98,6 +98,17 @@ export {
   type BuildCursorRequestOptions,
 } from "./request-build.js";
 import { hashSystemPrompt } from "./root-prompt.js";
+
+/** Bridge diagnostic for a stream that ended before `turnEnded`; RESET_RE classifies it as retriable. */
+const END_WITHOUT_TURN_END_MESSAGE =
+  "Cursor connection lost: the stream ended before the turn finished (connection reset), so the reply was cut off.";
+
+/** `interactionUpdate.textDelta`-style label for logs; never includes payload content. */
+function describeServerMessage(msg: { message: { case?: string; value?: unknown } }): string {
+  const outer = msg.message.case ?? "none";
+  const inner = (msg.message.value as { message?: { case?: string } } | undefined)?.message?.case;
+  return inner ? `${outer}.${inner}` : outer;
+}
 export { isSlimToolsEnabled, slimOpenAIToolsForCursor } from "./tool-schema.js";
 import { buildMcpToolDefinitions } from "./tool-schema.js";
 export {
@@ -900,6 +911,11 @@ function writeNativeStream(
   /** Set when a Cursor end-stream error is being retried through the `onClose` path. */
   let retriableEndError: string | null = null;
   let emittedUserVisibleContent = false;
+  /** Set when the HTTP/2 stream ended before `turnEnded`; `onClose` reports it as a lost connection. */
+  let endedWithoutTurnEnd = false;
+  // Last server message seen, logged when a stream ends without `turnEnded` to tell a dropped
+  // socket from a legitimate end the provider does not model yet.
+  let lastServerMessage = "none";
   // Only execs the client was actually told about may be recorded as pending: recovery matches the
   // snapshot against the tool results the client sends back, and it can only send back what it saw.
   const emittedExecs: PendingExec[] = [];
@@ -1115,6 +1131,30 @@ function writeNativeStream(
     }
   };
 
+  /** Saves the latest checkpoint for Pi calls still awaiting results; `details` extends the log. */
+  const saveMidPauseState = (details: Record<string, unknown> = {}) => {
+    const midPauseResult = handleBridgeCloseMidPause({
+      stored: conversationStates.get(convKey),
+      latestCheckpoint: checkpointRef.current,
+      blobStore,
+      completedTurns: persistenceTurns,
+      pendingExecs: emittedExecs,
+      convKey,
+    });
+    debugLog(
+      midPauseResult.committed
+        ? "bridge.died_mid_pause_checkpoint_saved"
+        : "bridge.died_mid_pause_no_checkpoint",
+      {
+        requestId,
+        bridgeKey,
+        convKey,
+        ...details,
+        pendingToolCallIds: emittedExecs.map((e) => e.toolCallId),
+      },
+    );
+  };
+
   /** Stops an exhausted rejection loop at a chunk boundary unless Pi calls are awaiting results. */
   const stopLocalToolLoop = (): boolean => {
     // Evaluate at chunk boundaries so Pi calls in the same chunk win. While
@@ -1137,20 +1177,43 @@ function writeNativeStream(
   const finalizeSuccessfulStream = () => {
     if (stopLocalToolLoop()) return;
     if (cancelled || streamFinalized) return;
+    // A healthy turn always carries `turnEnded` (or pauses on a Pi tool call) before the
+    // HTTP/2 stream ends. A stream that ends without either was cut off: a dropped socket
+    // (Wi-Fi change, VPN reconnect, sleep) can surface as a clean `end`, and finishing it
+    // as `stop` showed a truncated reply as if it were complete. Kill the bridge so
+    // `onClose` treats it as transport loss: retry from the checkpoint, or report an error.
+    if (!state.turnEnded && !mcpExecReceived) {
+      endedWithoutTurnEnd = true;
+      debugLog("native.stream.end_without_turn_end", {
+        requestId,
+        bridgeKey,
+        convKey,
+        lastServerMessage,
+        emittedUserVisibleContent,
+        hasCheckpoint: !!checkpointRef.current,
+      });
+      lifecycleLog("stream_end_without_turn_end", {
+        requestId,
+        bridgeKey: bridgeKeyPrefix(bridgeKey),
+        convKey,
+        lastServerMessage,
+        emittedUserVisibleContent,
+        hasCheckpoint: !!checkpointRef.current,
+      });
+      try {
+        bridge.proc.kill();
+      } catch {
+        // Already exiting; `onClose` still runs.
+      }
+      return;
+    }
     streamFinalized = true;
     idleWatchdog.clear();
     clearInterval(heartbeatTimer);
     options?.signal?.removeEventListener("abort", abort);
     const stored = conversationStates.get(convKey);
     if (mcpExecReceived) {
-      handleBridgeCloseMidPause({
-        stored,
-        latestCheckpoint: checkpointRef.current,
-        blobStore,
-        completedTurns: persistenceTurns,
-        pendingExecs: emittedExecs,
-        convKey,
-      });
+      saveMidPauseState({ cause: "stream_done" });
       removeActiveBridge(bridgeKey);
       return;
     }
@@ -1180,6 +1243,7 @@ function writeNativeStream(
       if (cancelled || streamFinalized) return;
       try {
         const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
+        lastServerMessage = describeServerMessage(serverMessage);
         const progress = processServerMessage(
           serverMessage,
           blobStore,
@@ -1362,6 +1426,12 @@ function writeNativeStream(
           }
           return;
         }
+        // `streamFinalized` makes `onClose` return early, so the mid-pause save and bridge
+        // release it would have done for a pending Pi call must happen here, before the kill.
+        if (mcpExecReceived) {
+          saveMidPauseState({ cause: "stream_error" });
+          removeActiveBridge(bridgeKey);
+        }
         streamFinalized = true;
         idleWatchdog.clear();
         clearInterval(heartbeatTimer);
@@ -1447,28 +1517,7 @@ function writeNativeStream(
     // A staged retriable end-stream error deliberately falls through to the transport-loss path
     // below, which owns restart-vs-fail. Anything else already reported the failure to the client.
     if (streamError && !retriableEndError) {
-      if (mcpExecReceived) {
-        const midPauseResult = handleBridgeCloseMidPause({
-          stored,
-          latestCheckpoint: checkpointRef.current,
-          blobStore,
-          completedTurns: persistenceTurns,
-          pendingExecs: emittedExecs,
-          convKey,
-        });
-        debugLog(
-          midPauseResult.committed
-            ? "bridge.died_mid_pause_checkpoint_saved"
-            : "bridge.died_mid_pause_no_checkpoint",
-          {
-            requestId,
-            bridgeKey,
-            convKey,
-            cause: "stream_error",
-            pendingToolCallIds: emittedExecs.map((e) => e.toolCallId),
-          },
-        );
-      }
+      if (mcpExecReceived) saveMidPauseState({ cause: "stream_error" });
       removeActiveBridge(bridgeKey);
       return;
     }
@@ -1480,12 +1529,22 @@ function writeNativeStream(
     if (code !== 0 && !completedTurnClose) {
       const failure = classifyBridgeExit({
         exitCode: code,
-        stderr: typeof bridge.lastStderr === "function" ? bridge.lastStderr() : "",
+        stderr: endedWithoutTurnEnd
+          ? `${END_WITHOUT_TURN_END_MESSAGE} ${typeof bridge.lastStderr === "function" ? bridge.lastStderr() : ""}`.trim()
+          : typeof bridge.lastStderr === "function"
+            ? bridge.lastStderr()
+            : "",
         // Cursor's own end-stream error names the failure far better than the exit code does.
         ...(retriableEndError ? { endErrorMessage: retriableEndError } : {}),
       });
+      // A stream that ends without turnEnded after showing text is not continued in place: the
+      // continuation lands in the same message, and nothing stops the model restating what it
+      // already said. Failing with the retriable "connection lost" error lets Pi's auto-retry
+      // replace the whole message instead. Other transport losses (reset, idle, end-stream
+      // error) still follow canRecoverAfterTransportLoss, as before.
       const allowRestart =
         failure.retryable &&
+        !(endedWithoutTurnEnd && emittedUserVisibleContent) &&
         canRecoverAfterTransportLoss({
           emittedUserVisibleContent,
           hasCheckpoint: !!checkpointRef.current,
@@ -1547,29 +1606,7 @@ function writeNativeStream(
           }
         }
       }
-      if (mcpExecReceived) {
-        const midPauseResult = handleBridgeCloseMidPause({
-          stored,
-          latestCheckpoint: checkpointRef.current,
-          blobStore,
-          completedTurns: persistenceTurns,
-          pendingExecs: emittedExecs,
-          convKey,
-        });
-        debugLog(
-          midPauseResult.committed
-            ? "bridge.died_mid_pause_checkpoint_saved"
-            : "bridge.died_mid_pause_no_checkpoint",
-          {
-            requestId,
-            bridgeKey,
-            convKey,
-            code,
-            failureKind: failure.kind,
-            pendingToolCallIds: emittedExecs.map((e) => e.toolCallId),
-          },
-        );
-      }
+      if (mcpExecReceived) saveMidPauseState({ code, failureKind: failure.kind });
       writer.error(formatTransportFailure(failure), "error", state);
       removeActiveBridge(bridgeKey);
       return;
@@ -1594,25 +1631,7 @@ function writeNativeStream(
       }
       writer.done("stop", state);
     } else {
-      const midPauseResult = handleBridgeCloseMidPause({
-        stored,
-        latestCheckpoint: checkpointRef.current,
-        blobStore,
-        completedTurns: persistenceTurns,
-        pendingExecs: emittedExecs,
-        convKey,
-      });
-      debugLog(
-        midPauseResult.committed
-          ? "bridge.died_mid_pause_checkpoint_saved"
-          : "bridge.died_mid_pause_no_checkpoint",
-        {
-          requestId,
-          bridgeKey,
-          convKey,
-          pendingToolCallIds: emittedExecs.map((e) => e.toolCallId),
-        },
-      );
+      saveMidPauseState();
       removeActiveBridge(bridgeKey);
     }
   });
