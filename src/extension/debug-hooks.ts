@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { join as pathJoin } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getCacheDir } from "../utils/cache-dir.js";
-import { cleanupSessionState } from "../stream/session-state.js";
+import { cleanupSessionState, releaseAbortedToolBridge } from "../stream/session-state.js";
 
 let extensionDebugLogFilePath: string | undefined;
 
@@ -254,6 +254,13 @@ export function registerSessionLifecycleCleanup(pi: ExtensionAPI): void {
   pi.on("session_before_fork", cleanupCurrentSession);
   pi.on("session_before_tree", cleanupCurrentSession);
   pi.on("session_shutdown", cleanupCurrentSession);
+  pi.on("agent_settled", (event, ctx) => {
+    // `aborted` is reported by newer Pi releases; older ones keep the TTL behaviour.
+    if ((event as { aborted?: boolean }).aborted !== true) return;
+    const sessionId = ctx.sessionManager.getSessionId();
+    const released = releaseAbortedToolBridge(sessionId);
+    debugExtensionLog("session.aborted_settle", { sessionId, released });
+  });
 }
 
 export function registerExtensionDebugHooks(pi: ExtensionAPI): void {
