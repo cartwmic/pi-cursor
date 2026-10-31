@@ -13,7 +13,11 @@ const PROTOCOL_ERROR_RE =
 // Size wording only. `resource_exhausted` is gRPC's generic limit code: Cursor sends it for
 // rate limits and exhausted plan quota too, usually with the bare message "Error".
 const CONTEXT_OVERFLOW_RE =
-  /\b(context[_ ]?(length|size|window)|payload too large|request too large|message too (?:large|long)|prompt (?:is )?too long|too many tokens)\b/i;
+  /\b(context[_ ]?(length|size|window)|payload too large|request[_ ]too[_ ]large|message too (?:large|long)|prompt (?:is )?too long|input is too long|too many tokens|token limit|maximum context)\b/i;
+
+// Throttle wording wins over quota wording: "Rate limit exceeded. Upgrade your subscription"
+// is a throttle that clears on its own, and calling it a quota stops Pi retrying it.
+const THROTTLE_RE = /\b(rate[_ ]?limit(?:ed)?|too many requests|429|throttl\w*|slow down)\b/i;
 
 const ACCOUNT_LIMIT_RE =
   /\b(resource_exhausted|quota|usage[_ ]?limit|rate[_ ]?limit(?:ed)?|too many requests|subscription|billing|spend(?:ing)? limit)\b/i;
@@ -38,11 +42,13 @@ export function formatContextOverflowHint(message: string): string {
 }
 
 /**
- * Quota wording reads "quota exceeded", which Pi's auto-retry treats as terminal. A bare
- * `resource_exhausted` reads as a rate limit, which Pi retries with backoff.
+ * Quota wording (without throttle wording) reads "quota exceeded", which Pi's auto-retry treats
+ * as terminal. Anything else reads "HTTP 429", which Pi retries with backoff. The hint must not
+ * say "rate limit" or "too many requests": Pi reads those as "not an overflow", which would hide
+ * overflow wording it recognises and this provider does not.
  */
 export function formatAccountLimitHint(message: string): string {
-  if (QUOTA_RE.test(message)) {
+  if (QUOTA_RE.test(message) && !THROTTLE_RE.test(message)) {
     return (
       `${message} ` +
       `[quota-hint: Cursor quota exceeded for this account or plan; this is not a context-size problem. ` +
@@ -51,8 +57,8 @@ export function formatAccountLimitHint(message: string): string {
   }
   return (
     `${message} ` +
-    `[limit-hint: Cursor rate limit or plan usage limit (resource_exhausted), not a context-size problem. ` +
-    `Wait and retry, or check /cursor.usage. Compact only if the session is near its context window.]`
+    `[limit-hint: Cursor refused this request with resource_exhausted (HTTP 429: a throttle or a plan usage limit), ` +
+    `not a context-size problem. Wait and retry, or check /cursor.usage.]`
   );
 }
 
