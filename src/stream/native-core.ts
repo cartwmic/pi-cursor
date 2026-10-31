@@ -1537,10 +1537,11 @@ function writeNativeStream(
         // Cursor's own end-stream error names the failure far better than the exit code does.
         ...(retriableEndError ? { endErrorMessage: retriableEndError } : {}),
       });
-      // A cut-off reply that already showed text is not continued in place: the continuation
-      // lands in the same message, and nothing stops the model restating what it already said.
-      // Failing with the retriable "connection lost" error lets Pi's auto-retry replace the
-      // whole message instead. With nothing shown yet, a restart cannot duplicate anything.
+      // A stream that ends without turnEnded after showing text is not continued in place: the
+      // continuation lands in the same message, and nothing stops the model restating what it
+      // already said. Failing with the retriable "connection lost" error lets Pi's auto-retry
+      // replace the whole message instead. Other transport losses (reset, idle, end-stream
+      // error) still follow canRecoverAfterTransportLoss, as before.
       const allowRestart =
         failure.retryable &&
         !(endedWithoutTurnEnd && emittedUserVisibleContent) &&

@@ -12,7 +12,7 @@
  * instead, at ~3.5 characters per token for every model. That ratio is typical
  * of the BPE tokenizers behind Cursor's Claude, GPT and Gemini models, and it is
  * still an estimate: plain prose runs closer to 4 (the estimate reads high) and
- * dense code or JSON closer to 3 (it reads up to ~15% low, so Pi compacts a
+ * dense code or JSON closer to 3 (it reads up to ~14% low, so Pi compacts a
  * little late). Without the breakdown, keep Cursor's own chars / 2.44 number,
  * which always reads higher than the estimate.
  *

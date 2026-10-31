@@ -479,6 +479,11 @@ export function estimateOutputTokens(
   return chars > 0 ? Math.ceil(chars / charsPerToken) : 0;
 }
 
+/**
+ * Context tokens come from the checkpoint Cursor sends after the reply, but that checkpoint does
+ * not count the reply itself (an essay of 2.6K chars moved its "conversation" category by under
+ * 0.5K), so input + output does not count the reply twice.
+ */
 export function computeUsage(state: StreamState, estimatedOutputTokens = 0) {
   const completion_tokens = Math.max(state.outputTokens, estimatedOutputTokens);
   const contextTokens = state.contextTokens ?? 0;
