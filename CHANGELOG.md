@@ -7,6 +7,7 @@
 - **Esc during a Pi tool call no longer leaves a Cursor stream open.** Pi cancels the tool and never sends the follow-up request, so the bridge parked for tool results stayed open until the next prompt or the one-hour TTL. It is now released when the aborted run settles (Pi releases that report `agent_settled.aborted`).
 - **Cost is `0` by default.** Cursor bills plan quota, not tokens. `PI_CURSOR_API_COST_ESTIMATE=1` restores API-rate estimates.
 - **Context tokens are estimated from the characters Cursor counted.** Cursor's `usedTokens` is chars / ~2.44 (its `tokenDetails` breakdown, now in `agent.proto`), which over-reported context and made Pi compact early. The provider now divides counted characters by `PI_CURSOR_CHARS_PER_TOKEN` (default `3.5`).
+- **Output tokens are never reported as zero for a reply that streamed text.** Cursor's `tokenDelta` is missing for short replies, so they reported `output: 0`. Output is now the larger of Cursor's sum and the streamed text, thinking and tool-call characters at the same chars-per-token rule.
 
 - Keep context overflow separate from wire-drift and retain up to 4096 conversation blobs.
 - Recover additive checkpoint fields while retaining Pi client identity on fields 21/22.

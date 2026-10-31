@@ -20,6 +20,7 @@ import type {
 
 import { redactSecrets } from "../utils/security.js";
 import type { CursorNativeModelRouting } from "./model-routing.js";
+import { resolveCharsPerToken } from "./token-estimate.js";
 import type {
   ChatCompletionRequest,
   ContentPart,
@@ -52,7 +53,7 @@ export function applyCursorUsage(
   state?: StreamState,
 ): void {
   if (!state) return;
-  const usage = computeUsage(state);
+  const usage = computeUsage(state, estimateOutputTokens(output));
   const { cacheRead, cacheWrite, input } = splitPromptTokensForCache(usage.prompt_tokens, state);
   const costInput = tokenCost(input, model.cost?.input);
   const costOutput = tokenCost(usage.completion_tokens, model.cost?.output);
@@ -458,8 +459,28 @@ export function resolveToolsForToolChoice(
   return { error: "Only tool_choice 'auto' and 'none' are supported by pi-cursor-provider." };
 }
 
-export function computeUsage(state: StreamState) {
-  const completion_tokens = state.outputTokens;
+/**
+ * Output tokens implied by what this message streamed: text, thinking and tool-call arguments,
+ * at the same characters-per-token rule as the context estimate. Cursor's `tokenDelta` is
+ * chars / 4 when it arrives at all, and it is absent for short replies and tool calls, which
+ * left per-turn output at or near zero.
+ */
+export function estimateOutputTokens(
+  output: Pick<AssistantMessage, "content">,
+  charsPerToken = resolveCharsPerToken(),
+): number {
+  let chars = 0;
+  for (const block of output.content) {
+    if (block.type === "text") chars += block.text.length;
+    else if (block.type === "thinking") chars += block.thinking.length;
+    else if (block.type === "toolCall")
+      chars += block.name.length + JSON.stringify(block.arguments ?? {}).length;
+  }
+  return chars > 0 ? Math.ceil(chars / charsPerToken) : 0;
+}
+
+export function computeUsage(state: StreamState, estimatedOutputTokens = 0) {
+  const completion_tokens = Math.max(state.outputTokens, estimatedOutputTokens);
   const contextTokens = state.contextTokens ?? 0;
   const total_tokens = state.totalTokens || Math.max(contextTokens, completion_tokens);
   const prompt_tokens =
