@@ -702,9 +702,11 @@ describe("retriable Cursor end-stream errors", () => {
   }: { mcpTools?: McpToolDefinition[]; bridgeKey?: string; convKey?: string } = {}) {
     const calls: string[] = [];
     const restarts: number[] = [];
+    const restartCheckpoints: (Uint8Array | null)[] = [];
     let killCalls = 0;
     let onData: (chunk: Buffer) => void = () => {};
     let onClose: (code: number) => void = () => {};
+    let onStreamDone: () => void = () => {};
     const bridge = {
       proc: {
         kill: () => {
@@ -723,6 +725,9 @@ describe("retriable Cursor end-stream errors", () => {
       },
       onClose: (cb: (code: number) => void) => {
         onClose = cb;
+      },
+      onStreamDone: (cb: () => void) => {
+        onStreamDone = cb;
       },
     };
     const writer = {
@@ -745,8 +750,9 @@ describe("retriable Cursor end-stream errors", () => {
       currentAttempt: 1,
       maxRetries: 5,
       recoverBeforeRetry: true,
-      restart(nextAttempt: number) {
+      restart(nextAttempt: number, context: { latestCheckpoint: Uint8Array | null }) {
         restarts.push(nextAttempt);
+        restartCheckpoints.push(context.latestCheckpoint);
         return true;
       },
     };
@@ -771,13 +777,112 @@ describe("retriable Cursor end-stream errors", () => {
     return {
       calls,
       restarts,
+      restartCheckpoints,
       get killCalls() {
         return killCalls;
       },
       onData,
+      streamDone: () => onStreamDone(),
       heartbeatTimer,
     };
   }
+
+  const serverFrame = (message: AgentServerMessage["message"]) =>
+    Buffer.from(
+      frameConnectMessage(
+        toBinary(AgentServerMessageSchema, create(AgentServerMessageSchema, { message })),
+      ),
+    );
+
+  // A clean HTTP/2 end without `turnEnded` is a cut-off stream. With a checkpoint and nothing
+  // shown yet, the provider restarts from that checkpoint instead of finishing an empty reply.
+  it("restarts from the checkpoint when a stream ends without turnEnded before any text", () => {
+    const harness = setup({ bridgeKey: "bridge-done-ckpt", convKey: "conv-done-ckpt" });
+    try {
+      const checkpoint = create(ConversationStateStructureSchema, {});
+      harness.onData(serverFrame({ case: "conversationCheckpointUpdate", value: checkpoint }));
+      harness.streamDone();
+
+      expect(harness.killCalls).toBe(1);
+      expect(harness.restarts).toEqual([2]);
+      expect(harness.restartCheckpoints).toEqual([
+        toBinary(ConversationStateStructureSchema, checkpoint),
+      ]);
+      expect(harness.calls).toEqual([]);
+    } finally {
+      clearInterval(harness.heartbeatTimer);
+      conversationStates.delete("conv-done-ckpt");
+    }
+  });
+
+  // Continuing in place after text was shown could restate it inside the same message. The
+  // retriable "connection lost" error lets Pi's auto-retry replace the message instead.
+  it("fails a cut-off stream that already showed text instead of continuing in place", () => {
+    const harness = setup({ bridgeKey: "bridge-done-text", convKey: "conv-done-text" });
+    try {
+      harness.onData(
+        serverFrame({
+          case: "interactionUpdate",
+          value: create(InteractionUpdateSchema, {
+            message: {
+              case: "textDelta",
+              value: create(TextDeltaUpdateSchema, { text: "The bi" }),
+            },
+          }),
+        }),
+      );
+      harness.onData(
+        serverFrame({
+          case: "conversationCheckpointUpdate",
+          value: create(ConversationStateStructureSchema, {}),
+        }),
+      );
+      harness.streamDone();
+
+      expect(harness.killCalls).toBe(1);
+      expect(harness.restarts).toEqual([]);
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls[0]).toMatch(/^error:Cursor connection lost/);
+    } finally {
+      clearInterval(harness.heartbeatTimer);
+      conversationStates.delete("conv-done-text");
+    }
+  });
+
+  // A Pi tool call ends Cursor's stream without `turnEnded` by design: the turn is paused on
+  // the result, not cut off, so the bridge must stay up for it.
+  it("does not kill or restart a stream that ends paused on a Pi tool call", () => {
+    const bridgeKey = "bridge-done-pause";
+    const harness = setup({
+      mcpTools: buildMcpToolDefinitions([
+        { type: "function", function: { name: "bash", parameters: { type: "object" } } },
+      ]),
+      bridgeKey,
+      convKey: "conv-done-pause",
+    });
+    try {
+      harness.onData(
+        serverFrame({
+          case: "execServerMessage",
+          value: create(ExecServerMessageSchema, {
+            id: 7,
+            execId: "exec-7",
+            message: { case: "mcpArgs", value: { toolName: "bash", toolCallId: "call-1" } },
+          }),
+        }),
+      );
+      expect(harness.calls).toEqual(["done:toolUse"]);
+      harness.streamDone();
+
+      expect(harness.killCalls).toBe(0);
+      expect(harness.restarts).toEqual([]);
+      expect(harness.calls).toEqual(["done:toolUse"]);
+    } finally {
+      clearInterval(harness.heartbeatTimer);
+      removeActiveBridge(bridgeKey);
+      conversationStates.delete("conv-done-pause");
+    }
+  });
 
   // A transient upstream `internal` is the most common mid-session failure, and it arrives as an
   // end-stream frame rather than a bridge exit. Failing the turn on it strands work the retry
