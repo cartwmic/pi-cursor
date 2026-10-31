@@ -255,7 +255,7 @@ export function registerSessionLifecycleCleanup(pi: ExtensionAPI): void {
   pi.on("session_before_tree", cleanupCurrentSession);
   pi.on("session_shutdown", cleanupCurrentSession);
   pi.on("agent_settled", (event, ctx) => {
-    // `aborted` is reported by newer Pi releases; older ones keep the TTL behaviour.
+    // Pi reports `aborted` from 1.1.0; releases without it keep the TTL behaviour.
     if ((event as { aborted?: boolean }).aborted !== true) return;
     const sessionId = ctx.sessionManager.getSessionId();
     const released = releaseAbortedToolBridge(sessionId);
