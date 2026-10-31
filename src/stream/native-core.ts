@@ -102,6 +102,13 @@ import { hashSystemPrompt } from "./root-prompt.js";
 /** Bridge diagnostic for a stream that ended before `turnEnded`; RESET_RE classifies it as retriable. */
 const END_WITHOUT_TURN_END_MESSAGE =
   "Cursor connection lost: the stream ended before the turn finished (connection reset), so the reply was cut off.";
+
+/** `interactionUpdate.textDelta`-style label for logs; never includes payload content. */
+function describeServerMessage(msg: { message: { case?: string; value?: unknown } }): string {
+  const outer = msg.message.case ?? "none";
+  const inner = (msg.message.value as { message?: { case?: string } } | undefined)?.message?.case;
+  return inner ? `${outer}.${inner}` : outer;
+}
 export { isSlimToolsEnabled, slimOpenAIToolsForCursor } from "./tool-schema.js";
 import { buildMcpToolDefinitions } from "./tool-schema.js";
 export {
@@ -906,6 +913,9 @@ function writeNativeStream(
   let emittedUserVisibleContent = false;
   /** Set when the HTTP/2 stream ended before `turnEnded`; `onClose` reports it as a lost connection. */
   let endedWithoutTurnEnd = false;
+  // Last server message seen, logged when a stream ends without `turnEnded` to tell a dropped
+  // socket from a legitimate end the provider does not model yet.
+  let lastServerMessage = "none";
   // Only execs the client was actually told about may be recorded as pending: recovery matches the
   // snapshot against the tool results the client sends back, and it can only send back what it saw.
   const emittedExecs: PendingExec[] = [];
@@ -1178,6 +1188,7 @@ function writeNativeStream(
         requestId,
         bridgeKey,
         convKey,
+        lastServerMessage,
         emittedUserVisibleContent,
         hasCheckpoint: !!checkpointRef.current,
       });
@@ -1185,6 +1196,7 @@ function writeNativeStream(
         requestId,
         bridgeKey: bridgeKeyPrefix(bridgeKey),
         convKey,
+        lastServerMessage,
         emittedUserVisibleContent,
         hasCheckpoint: !!checkpointRef.current,
       });
@@ -1231,6 +1243,7 @@ function writeNativeStream(
       if (cancelled || streamFinalized) return;
       try {
         const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
+        lastServerMessage = describeServerMessage(serverMessage);
         const progress = processServerMessage(
           serverMessage,
           blobStore,
@@ -1524,8 +1537,13 @@ function writeNativeStream(
         // Cursor's own end-stream error names the failure far better than the exit code does.
         ...(retriableEndError ? { endErrorMessage: retriableEndError } : {}),
       });
+      // A cut-off reply that already showed text is not continued in place: the continuation
+      // lands in the same message, and nothing stops the model restating what it already said.
+      // Failing with the retriable "connection lost" error lets Pi's auto-retry replace the
+      // whole message instead. With nothing shown yet, a restart cannot duplicate anything.
       const allowRestart =
         failure.retryable &&
+        !(endedWithoutTurnEnd && emittedUserVisibleContent) &&
         canRecoverAfterTransportLoss({
           emittedUserVisibleContent,
           hasCheckpoint: !!checkpointRef.current,
